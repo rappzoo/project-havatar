@@ -1,0 +1,203 @@
+salut
+lume
+test
+mulțumesc
+ajută-mă
+ce faci
+la revedere
+bună
+bună ziua
+bună dimineața
+bună seara
+noapte bună
+pe curând
+aș vrea
+aș dori
+vă rog
+cu plăcere
+scuzați-mă
+iertați-mă
+așteptați
+veniți aici
+pleacă
+oprește
+mergem
+mă duc
+vânt
+căldură
+frig
+ploaie
+zăpadă
+soare
+nori
+frumos
+urât
+bun
+rău
+mare
+mic
+lung
+scurt
+înalt
+jos
+nou
+vechi
+tânăr
+bătrân
+sănătos
+bolnav
+fericit
+trist
+obosit
+foame
+sete
+cald
+rece
+luminos
+întunecat
+ușor
+greu
+tare
+moale
+curat
+murdar
+proaspăt
+stricat
+drept
+stâng
+sus
+jos
+înainte
+înapoi
+lângă
+departe
+aproape
+acasă
+afară
+înăuntru
+deschis
+închis
+da
+nu
+bine
+rău
+aici
+acolo
+unde
+ce
+cine
+când
+de ce
+cum
+poate
+sigur
+cu siguranță
+desigur
+înțeleg
+nu înțeleg
+vorbesc puțin română
+vă rog să repetați
+vorbiți mai încet
+nu știu
+nu pot
+vreau să învăț
+este important
+este urgent
+avețidreptate
+greșit
+corect
+așa este
+nu este adevărat
+probleme
+dificultăți
+soluții
+răspunsuri
+întrebări
+camera
+video
+audio
+microfonul
+difuzorul
+înregistrare
+fotografie
+sistem
+stare
+restart
+volum
+mișcare
+motor
+baterie
+rețea
+internet
+conexiune
+rapid
+încet
+mai bine
+mai rău
+fierbinte
+frig
+sus
+jos
+înăuntru
+afară
+deschide
+închide
+începere
+sfârșit
+prima
+ultimul
+următorul
+anterior
+înainte
+după
+acum
+mai târziu
+azi
+mâine
+ieri
+timp
+oră
+minut
+secundă
+vreme
+însorit
+noros
+ploios
+zăpados
+vântos
+vesel
+trist
+emoționat
+obosit
+flămând
+însetat
+cald
+rece
+mare
+mic
+lung
+scurt
+înalt
+jos
+tare
+încet
+luminos
+întunecat
+ușor
+greu
+tare
+moale
+netezit
+aspru
+curat
+murdar
+proaspăt
+vechi
+nou
+tânăr
+sănătos
+bolnav
+frumos
+interesant
+plictisitor
+important

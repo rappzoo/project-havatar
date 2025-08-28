@@ -1,0 +1,64 @@
+{
+  "timestamp": "2025-08-21 14:13:32",
+  "selected_devices": {
+    "camera": {
+      "name": "webcamproduct: usb-webcam (usb-xhci-hcd.0-1.1):",
+      "path": "/dev/video0",
+      "type": "usb_camera"
+    },
+    "microphone": {
+      "name": "webcamproduct [webcamproduct] - USB Audio [USB Audio]",
+      "path": "plughw:0,0"
+    },
+    "speaker": {
+      "name": "UACDemoV10 [UACDemoV1.0] - USB Audio [USB Audio]",
+      "path": "plughw:3,0"
+    },
+    "motor_controller": {
+      "name": "CP2102N_USB_to_UART_Bridge_Controller (/dev/ttyUSB0)",
+      "path": "/dev/ttyUSB0",
+      "type": "generic_controller"
+    }
+  },
+  "camera_config": {
+    "driver": "v4l2",
+    "device": "/dev/video0",
+    "resolutions": {
+      "320p": {
+        "width": 640,
+        "height": 360,
+        "fps": 15
+      },
+      "480p": {
+        "width": 640,
+        "height": 480,
+        "fps": 20
+      },
+      "720p": {
+        "width": 1280,
+        "height": 720,
+        "fps": 10
+      }
+    },
+    "format": "mjpeg",
+    "hardware_acceleration": false
+  },
+  "audio_config": {
+    "input_device": "plughw:0,0",
+    "output_device": "plughw:3,0"
+  },
+  "motor_config": {
+    "port": "/dev/ttyUSB0",
+    "baudrate": 115200,
+    "controller_type": "generic_controller"
+  },
+  "streaming_config": {
+    "mediamtx": {
+      "rtsp_port": 8554,
+      "webrtc_port": 8889,
+      "hls_port": 8888,
+      "api_port": 9997
+    },
+    "default_quality": "720p"
+  }
+}
