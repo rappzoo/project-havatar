@@ -1018,6 +1018,110 @@ def audio_devices():
         "override_hint": "export AV_MIC='plughw:CARD,DEV' AV_SPK='plughw:CARD,DEV' before starting the app to force"
     })
 
+# ============== Mumble Controller for Two-Way Audio ==============
+class MumbleController:
+    def __init__(self):
+        self.mumble_process = None
+        self.server_ip = None
+        self.username = "AvatarTank"
+        self.connected = False
+        self.muted = False
+        self.server_port = 64738
+        self.lock = threading.Lock()
+        
+    def connect(self, server_ip, username=None, port=64738):
+        """Connect to Mumble server"""
+        with self.lock:
+            if self.connected:
+                return {"ok": True, "msg": "Already connected"}
+            
+            self.server_ip = server_ip
+            self.server_port = port
+            if username:
+                self.username = username
+            
+            try:
+                # Start Mumble client in headless mode
+                cmd = [
+                    'mumble',
+                    '--server', server_ip,
+                    '--port', str(port),
+                    '--username', self.username,
+                    '--headless'  # Run without GUI
+                ]
+                
+                # Set environment variables for audio devices
+                env = os.environ.copy()
+                env['PULSE_RUNTIME_PATH'] = '/run/user/1000/pulse'
+                env['ALSA_CARD'] = MIC_PLUG.split(':')[1].split(',')[0] if ':' in MIC_PLUG else '0'
+                
+                self.mumble_process = subprocess.Popen(
+                    cmd, 
+                    env=env,
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE
+                )
+                
+                # Give it time to connect
+                time.sleep(3)
+                
+                # Check if process is still running
+                if self.mumble_process.poll() is None:
+                    self.connected = True
+                    return {"ok": True, "msg": f"Connected to {server_ip}"}
+                else:
+                    stdout, stderr = self.mumble_process.communicate()
+                    return {"ok": False, "msg": f"Connection failed: {stderr.decode()}"}
+                
+            except Exception as e:
+                return {"ok": False, "msg": f"Failed to start Mumble: {e}"}
+    
+    def disconnect(self):
+        """Disconnect from Mumble server"""
+        with self.lock:
+            if self.mumble_process:
+                try:
+                    self.mumble_process.terminate()
+                    self.mumble_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.mumble_process.kill()
+                except:
+                    pass
+                self.mumble_process = None
+            
+            self.connected = False
+            return {"ok": True, "msg": "Disconnected"}
+    
+    def toggle_mute(self):
+        """Toggle mute status using system commands"""
+        if not self.connected:
+            return {"ok": False, "msg": "Not connected"}
+        
+        try:
+            # Use xdotool to send Ctrl+M to mumble (mute hotkey)
+            subprocess.run(['xdotool', 'search', '--name', 'mumble', 'key', 'ctrl+m'], 
+                         check=False, timeout=2)
+            self.muted = not self.muted
+            return {"ok": True, "muted": self.muted}
+        except Exception as e:
+            return {"ok": False, "msg": f"Mute toggle failed: {e}"}
+    
+    def get_status(self):
+        """Get current Mumble status"""
+        is_running = self.mumble_process and self.mumble_process.poll() is None
+        return {
+            "ok": True,
+            "connected": self.connected and is_running,
+            "server": self.server_ip,
+            "port": self.server_port,
+            "username": self.username,
+            "muted": self.muted,
+            "process_running": is_running
+        }
+
+# Initialize Mumble controller
+mumble = MumbleController()
+
 # ============== WebRTC Audio Streaming with aiortc ==============
 # WebRTC peer connections storage
 webrtc_peers = {}
@@ -1032,210 +1136,21 @@ if WEBRTC_AVAILABLE:
         
         def __init__(self, device=MIC_PLUG):
             super().__init__()
-            self.player = None
-            self.audio_track = None
-            self.device = device
-            
-            # Try multiple approaches to create working MediaPlayer
-            self._setup_media_player()
-        
-        def _setup_media_player(self):
-            """Try multiple approaches to setup MediaPlayer with ALSA"""
-            approaches = [
-                # Approach 1: Direct ALSA device
-                lambda: self._try_direct_alsa(),
-                # Approach 2: Use 'default' ALSA device
-                lambda: self._try_default_alsa(),
-                # Approach 3: Use pulse audio if available
-                lambda: self._try_pulse_audio(),
-                # Approach 4: Use ffmpeg directly with ALSA
-                lambda: self._try_ffmpeg_alsa()
-            ]
-            
-            for i, approach in enumerate(approaches, 1):
-                try:
-                    print(f"[WebRTC] Trying audio setup approach {i}...")
-                    if approach():
-                        print(f"[WebRTC] Audio setup approach {i} successful")
-                        return
-                except Exception as e:
-                    print(f"[WebRTC] Audio setup approach {i} failed: {e}")
-            
-            print("[WebRTC] All audio setup approaches failed")
-        
-        def _try_direct_alsa(self):
-            """Try using the detected ALSA device directly"""
+            # Use ffmpeg for audio capture but optimized for WebRTC
             options = {
-                'sample_rate': '16000',
-                'channels': '1',
-                'sample_format': 's16le'
+                'format': 'alsa',
+                'audio_size': '480',  # 10ms frames for ultra-low latency
+                'sample_rate': '48000',  # WebRTC standard
+                'channels': '1'
             }
-            
-            try:
-                # For aiortc MediaPlayer, we need to format the device as a proper input
-                if self.device and self.device != 'default':
-                    # Convert plughw:X,Y to proper ALSA format for aiortc
-                    device_input = f"alsa={self.device}"
-                    print(f"[WebRTC] Trying direct ALSA with: {device_input}")
-                    self.player = MediaPlayer(device_input, options=options)
-                else:
-                    # Use default ALSA device
-                    print(f"[WebRTC] Trying direct ALSA with: alsa=default")
-                    self.player = MediaPlayer("alsa=default", options=options)
-                
-                if self.player and hasattr(self.player, 'audio') and self.player.audio:
-                    self.audio_track = self.player.audio
-                    print(f"[WebRTC] Direct ALSA setup successful")
-                    return True
-                else:
-                    print(f"[WebRTC] Direct ALSA player created but no audio track")
-                    return False
-            except Exception as e:
-                print(f"[WebRTC] Direct ALSA failed: {e}")
-                return False
-        
-        def _try_default_alsa(self):
-            """Try using default ALSA device"""
-            try:
-                options = {
-                    'sample_rate': '16000',
-                    'channels': '1'
-                }
-                
-                print(f"[WebRTC] Trying default ALSA device")
-                self.player = MediaPlayer("alsa=default", options=options)
-                if self.player and hasattr(self.player, 'audio') and self.player.audio:
-                    self.audio_track = self.player.audio
-                    print(f"[WebRTC] Default ALSA setup successful")
-                    return True
-                else:
-                    print(f"[WebRTC] Default ALSA player created but no audio track")
-                    return False
-            except Exception as e:
-                print(f"[WebRTC] Default ALSA failed: {e}")
-                return False
-        
-        def _try_pulse_audio(self):
-            """Try using PulseAudio if available"""
-            try:
-                options = {
-                    'sample_rate': '16000',
-                    'channels': '1'
-                }
-                
-                print(f"[WebRTC] Trying PulseAudio")
-                self.player = MediaPlayer("pulse", format="pulse", options=options)
-                if self.player and hasattr(self.player, 'audio') and self.player.audio:
-                    self.audio_track = self.player.audio
-                    print(f"[WebRTC] PulseAudio setup successful")
-                    return True
-                else:
-                    print(f"[WebRTC] PulseAudio player created but no audio track")
-                    return False
-            except Exception as e:
-                print(f"[WebRTC] PulseAudio failed: {e}")
-                return False
-        
-        def _try_ffmpeg_alsa(self):
-            """Try using FFmpeg with specific ALSA parameters"""
-            options = {
-                'f': 'alsa',
-                'ar': '16000',
-                'ac': '1',
-                'sample_fmt': 's16'
-            }
-            
-            # Try with specific device first, then default
-            devices_to_try = []
-            if self.device and self.device != 'default':
-                devices_to_try.append(self.device)
-            devices_to_try.extend(['default', 'plughw:0,0', 'hw:0,0'])
-            
-            for device in devices_to_try:
-                try:
-                    self.player = MediaPlayer(device, format='alsa', options=options)
-                    if self.player and hasattr(self.player, 'audio'):
-                        self.audio_track = self.player.audio
-                        print(f"[WebRTC] FFmpeg ALSA setup successful with device: {device}")
-                        return True
-                except Exception as e:
-                    print(f"[WebRTC] FFmpeg ALSA failed with device {device}: {e}")
-                    continue
-            
-            return False
+            self.player = MediaPlayer(f"alsa://{device}", format="alsa", options={"channels": "1", "sample_rate": "48000"})
+            self.audio_track = self.player.audio
         
         async def recv(self):
-            """Receive audio frame from the media player"""
             if self.audio_track:
-                try:
-                    frame = await self.audio_track.recv()
-                    if frame:
-                        print(f"[WebRTC] Audio frame received: {frame.format}, {frame.sample_rate}Hz")
-                        return frame
-                    else:
-                        print(f"[WebRTC] Audio track returned None frame")
-                except Exception as e:
-                    print(f"[WebRTC] Audio recv error: {e}")
-                    # Try to recreate player on error once
-                    if not hasattr(self, '_recreation_attempted'):
-                        self._recreation_attempted = True
-                        print(f"[WebRTC] Attempting to recreate MediaPlayer...")
-                        self._setup_media_player()
-                        # Try again after recreation
-                        try:
-                            if self.audio_track:
-                                frame = await self.audio_track.recv()
-                                if frame:
-                                    return frame
-                        except Exception as e2:
-                            print(f"[WebRTC] Retry after recreation failed: {e2}")
-            
-            # Fallback: Generate silent audio frames to keep WebRTC connection alive
-            return self._generate_silent_frame()
-        
-        def _generate_silent_frame(self):
-            """Generate a silent audio frame as fallback"""
-            try:
-                import numpy as np
-                from av import AudioFrame
-                
-                # Generate 20ms of silence at 16kHz (320 samples)
-                samples = np.zeros(320, dtype=np.int16)
-                frame = AudioFrame.from_ndarray(samples.reshape(1, -1), format='s16', layout='mono')
-                frame.sample_rate = 16000
-                frame.pts = getattr(self, '_frame_count', 0) * 320
-                self._frame_count = getattr(self, '_frame_count', 0) + 1
-                
-                # Add some debug info periodically
-                if self._frame_count % 100 == 0:  # Every 2 seconds
-                    print(f"[WebRTC] Generated {self._frame_count} silent frames (MediaPlayer not working)")
-                
+                frame = await self.audio_track.recv()
                 return frame
-            except Exception as e:
-                print(f"[WebRTC] Error generating silent frame: {e}")
-                return None
-        
-        def stop(self):
-            """Stop the audio track and cleanup"""
-            try:
-                if self.audio_track:
-                    self.audio_track = None
-                if self.player:
-                    # Safely close the player
-                    if hasattr(self.player, 'close'):
-                        try:
-                            # Run any cleanup in event loop if needed
-                            import asyncio
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            loop.run_until_complete(self.player.close())
-                            loop.close()
-                        except:
-                            pass
-                    self.player = None
-                print("[WebRTC] AudioStreamTrack stopped")
-            except Exception as e:
-                print(f"[WebRTC] Error stopping AudioStreamTrack: {e}")
+            return None
 else:
     # Dummy class when WebRTC is not available
     class AudioStreamTrack:
@@ -1251,26 +1166,18 @@ if WEBRTC_AVAILABLE:
         """
         try:
             data = request.get_json()
-            if not data or 'sdp' not in data or 'type' not in data:
-                return jsonify({'ok': False, 'error': 'Invalid offer data'})
-            
             offer = RTCSessionDescription(sdp=data['sdp'], type=data['type'])
             
             # Create new peer connection
             pc = RTCPeerConnection()
-            peer_id = f"audio_{len(webrtc_peers)}_{int(time.time())}"
+            peer_id = f"audio_{len(webrtc_peers)}"
             
             with webrtc_lock:
                 webrtc_peers[peer_id] = pc
             
             # Add audio track
-            try:
-                audio_track = AudioStreamTrack()
-                pc.addTrack(audio_track)
-                print(f"[WebRTC] Audio track added for peer {peer_id}")
-            except Exception as e:
-                print(f"[WebRTC] Failed to add audio track: {e}")
-                # Continue without audio track - let WebRTC handle the negotiation
+            audio_track = AudioStreamTrack()
+            pc.addTrack(audio_track)
             
             @pc.on("connectionstatechange")
             async def on_connectionstatechange():
@@ -1279,41 +1186,22 @@ if WEBRTC_AVAILABLE:
                     with webrtc_lock:
                         webrtc_peers.pop(peer_id, None)
             
-            # Handle offer using thread-safe approach
-            def handle_offer_sync():
-                try:
-                    # Use asyncio.run() which handles event loop creation properly
-                    async def process_offer():
-                        await pc.setRemoteDescription(offer)
-                        answer = await pc.createAnswer()
-                        await pc.setLocalDescription(answer)
-                        return {
-                            'sdp': pc.localDescription.sdp,
-                            'type': pc.localDescription.type
-                        }
-                    
-                    # Run the async function in a proper event loop
-                    import asyncio
-                    try:
-                        # Try to get existing loop
-                        loop = asyncio.get_running_loop()
-                        # If we're in an existing loop, we need to run in a thread
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(asyncio.run, process_offer())
-                            return future.result(timeout=10)
-                    except RuntimeError:
-                        # No running loop, safe to use asyncio.run
-                        return asyncio.run(process_offer())
-                        
-                except Exception as e:
-                    print(f"[WebRTC] Offer processing error: {e}")
-                    raise
+            # Handle offer in async context
+            async def handle_offer():
+                await pc.setRemoteDescription(offer)
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
+                return {
+                    'sdp': pc.localDescription.sdp,
+                    'type': pc.localDescription.type
+                }
             
-            # Execute the offer handling
-            answer_data = handle_offer_sync()
+            # Run in event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            answer_data = loop.run_until_complete(handle_offer())
+            loop.close()
             
-            print(f"[WebRTC] Offer processed successfully for peer {peer_id}")
             return jsonify({
                 'ok': True,
                 'answer': answer_data,
@@ -1322,13 +1210,6 @@ if WEBRTC_AVAILABLE:
             
         except Exception as e:
             print(f"[WebRTC] Offer error: {e}")
-            # Clean up on error
-            try:
-                with webrtc_lock:
-                    if 'peer_id' in locals():
-                        webrtc_peers.pop(peer_id, None)
-            except:
-                pass
             return jsonify({'ok': False, 'error': str(e)})
 
     @app.route('/webrtc/close/<peer_id>', methods=['POST'])
@@ -1341,43 +1222,16 @@ if WEBRTC_AVAILABLE:
                 pc = webrtc_peers.pop(peer_id, None)
             
             if pc:
-                # Stop all tracks before closing connection
-                try:
-                    for sender in pc.getSenders():
-                        if sender.track:
-                            if hasattr(sender.track, 'stop'):
-                                sender.track.stop()
-                except Exception as e:
-                    print(f"[WebRTC] Error stopping tracks: {e}")
+                async def close_connection():
+                    await pc.close()
                 
-                # Close connection using thread-safe approach
-                def close_connection_sync():
-                    try:
-                        async def process_close():
-                            await pc.close()
-                        
-                        import asyncio
-                        try:
-                            # Try to get existing loop
-                            loop = asyncio.get_running_loop()
-                            # If we're in an existing loop, run in a thread
-                            import concurrent.futures
-                            with concurrent.futures.ThreadPoolExecutor() as executor:
-                                future = executor.submit(asyncio.run, process_close())
-                                future.result(timeout=5)
-                        except RuntimeError:
-                            # No running loop, safe to use asyncio.run
-                            asyncio.run(process_close())
-                            
-                    except Exception as e:
-                        print(f"[WebRTC] Close processing error: {e}")
-                
-                close_connection_sync()
-                print(f"[WebRTC] Connection {peer_id} closed and cleaned up")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(close_connection())
+                loop.close()
             
             return jsonify({'ok': True, 'msg': 'Connection closed'})
         except Exception as e:
-            print(f"[WebRTC] Error closing connection {peer_id}: {e}")
             return jsonify({'ok': False, 'error': str(e)})
 else:
     # Dummy WebRTC routes when aiortc is not available
@@ -1392,7 +1246,6 @@ else:
 # Simple WebSocket fallback for browsers that don't support WebRTC properly
 websocket_active = False
 websocket_process = None
-
 @socketio.on('start_simple_audio')
 def handle_start_simple_audio():
     global websocket_active, websocket_process
@@ -1404,24 +1257,28 @@ def handle_start_simple_audio():
     try:
         websocket_active = True
         
-        # Ultra-simple, robust audio streaming
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
             "-f", "alsa", "-i", MIC_PLUG,
-            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-            "-f", "wav", "-"
+            "-acodec", "pcm_s16le", "-ar", "22050", "-ac", "1",
+            "-f", "s16le", "-"  # Raw PCM output
         ]
         
         websocket_process = subprocess.Popen(cmd, stdout=PIPE, stderr=subprocess.DEVNULL, bufsize=1024)
         
         def audio_worker():
+            import base64
             try:
                 while websocket_active and websocket_process:
-                    chunk = websocket_process.stdout.read(1024)
+                    chunk = websocket_process.stdout.read(2048)
                     if not chunk:
                         break
-                    # Send binary data via WebSocket
-                    socketio.emit('audio_data', chunk, room=request.sid)
+                    # Encode as base64 for JSON transport
+                    chunk_b64 = base64.b64encode(chunk).decode('ascii')
+                    socketio.emit('audio_data', {
+                        'data': chunk_b64,
+                        'format': 'pcm_s16le_22050_mono'
+                    })
             except Exception as e:
                 print(f"[SimpleAudio] Error: {e}")
             finally:
@@ -1434,7 +1291,7 @@ def handle_start_simple_audio():
         thread = threading.Thread(target=audio_worker, daemon=True)
         thread.start()
         
-        emit('audio_status', {'status': 'started', 'format': 'pcm_16khz'})
+        emit('audio_status', {'status': 'started', 'format': 'pcm_s16le_22050_mono'})
         print(f"[SimpleAudio] Started for client {request.sid}")
         
     except Exception as e:
@@ -1474,6 +1331,28 @@ def handle_disconnect():
         handle_stop_simple_audio()
     print(f"[WebSocket] Client {request.sid} disconnected")
 
+
+
+@app.route('/audio_stream')
+def audio_stream():
+    def generate():
+        cmd = [
+            "ffmpeg","-hide_banner","-loglevel","error","-nostdin",
+            "-f","alsa","-i",MIC_PLUG,
+            "-ac","1","-ar","16000",
+            "-c:a","pcm_s16le","-f","wav","-"
+        ]
+        proc = subprocess.Popen(cmd, stdout=PIPE, stderr=subprocess.DEVNULL, bufsize=4096)
+        try:
+            while True:
+                data = proc.stdout.read(4096)
+                if not data:
+                    break
+                yield data
+        finally:
+            proc.terminate()
+    return Response(generate(), mimetype='audio/wav')
+
 @app.route('/mic_test')
 def mic_test():
     # ffmpeg tends to be more robust than arecord across formats
@@ -1497,6 +1376,51 @@ def stop_recording(): return jsonify(rec.stop())
 
 @app.route('/recording_status')
 def recording_status(): return jsonify(rec.status())
+
+# ---- Mumble routes for two-way audio ----
+@app.route('/mumble/connect', methods=['POST'])
+def mumble_connect():
+    """Connect to Mumble server"""
+    try:
+        data = request.get_json() or {}
+        server_ip = data.get('server_ip')
+        username = data.get('username', 'AvatarTank')
+        port = data.get('port', 64738)
+        
+        if not server_ip:
+            return jsonify({"ok": False, "msg": "Server IP is required"})
+        
+        result = mumble.connect(server_ip, username, port)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"Connection error: {str(e)}"})
+
+@app.route('/mumble/disconnect', methods=['POST'])
+def mumble_disconnect():
+    """Disconnect from Mumble server"""
+    try:
+        result = mumble.disconnect()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"Disconnection error: {str(e)}"})
+
+@app.route('/mumble/toggle_mute', methods=['POST'])
+def mumble_toggle_mute():
+    """Toggle Mumble mute status"""
+    try:
+        result = mumble.toggle_mute()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"Mute toggle error: {str(e)}"})
+
+@app.route('/mumble/status')
+def mumble_status():
+    """Get Mumble connection status"""
+    try:
+        status = mumble.get_status()
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"Status error: {str(e)}"})
 
 # ---- prediction endpoints ----
 @app.route("/predict")
@@ -1891,6 +1815,26 @@ def index():
         <span id="audio-quality" style="font-size:10px;color:#44ff44">WebRTC Ready</span>
       </div>
       <audio id="audio-playback" autoplay style="display:none"></audio>
+    </div>
+
+    <!-- Mumble Controls -->
+    <div class="group">
+      <h4>📡 Mumble</h4>
+      <div class="row">
+        <input id="mumble_server" type="text" placeholder="Server IP" style="flex:1;margin-right:5px;background:rgba(20,20,20,0.8);border:1px solid #ff8c00;color:#cccccc;padding:6px;border-radius:5px;font-size:12px">
+        <input id="mumble_port" type="text" placeholder="Port" value="64738" style="width:60px;background:rgba(20,20,20,0.8);border:1px solid #ff8c00;color:#cccccc;padding:6px;border-radius:5px;font-size:12px">
+      </div>
+      <div class="row" style="margin-top:5px">
+        <input id="mumble_username" type="text" placeholder="Username" value="AvatarTank" style="flex:1;margin-right:5px;background:rgba(20,20,20,0.8);border:1px solid #ff8c00;color:#cccccc;padding:6px;border-radius:5px;font-size:12px">
+        <button id="mumble_connect_btn" class="btn" onclick="connectMumble()" style="width:80px">Connect</button>
+      </div>
+      <div class="row" style="margin-top:5px">
+        <button id="mumble_disconnect_btn" class="btn" onclick="disconnectMumble()" style="flex:1;margin-right:5px">Disconnect</button>
+        <button id="mumble_mute_btn" class="btn" onclick="toggleMumbleMute()" style="width:80px">🔊</button>
+      </div>
+      <div class="row" style="margin-top:5px;font-size:12px">
+        <span>Status: <span id="mumble_status">Disconnected</span></span>
+      </div>
     </div>
 
     <div class="group">
@@ -2481,12 +2425,13 @@ let webrtcPeer = null;
 let webrtcPeerId = null;
 let audioContext = null;
 let audioWorklet = null;
+let socket = null; // Global socket variable declared ONCE
 
 function initWebSocket() {
   try {
     if (socket && socket.connected) return socket;
     
-    console.log('Initializing WebSocket connection...');
+    console.log('Initializing complete Socket.IO connection...');
     
     socket = io({
       timeout: 10000,
@@ -2497,17 +2442,17 @@ function initWebSocket() {
     });
     
     socket.on('connect', function() {
-      console.log('WebSocket connected successfully');
+      console.log('Socket.IO connected:', socket.id);
       updateMicStatus('WebSocket ready');
     });
     
     socket.on('connect_error', function(error) {
-      console.error('WebSocket connection error:', error);
+      console.error('Socket.IO connection error:', error);
       updateMicStatus('WebSocket connect error');
     });
     
     socket.on('disconnect', function(reason) {
-      console.log('WebSocket disconnected:', reason);
+      console.log('Socket.IO disconnected:', reason);
       audioActive = false;
       updateMicButton();
       updateMicStatus('WebSocket disconnected');
@@ -2519,13 +2464,15 @@ function initWebSocket() {
         updateMicStatus('Audio error: ' + (data.message || 'Unknown'));
         audioActive = false;
         updateMicButton();
-      } else {
-        updateMicStatus(data.status || 'Unknown status');
+      } else if (data.status === 'started') {
+        updateMicStatus('Audio streaming active (WebSocket fallback)');
       }
     });
     
     socket.on('audio_data', function(data) {
-      // Handle raw audio data from WebSocket fallback
+      console.log('Received audio_data:', data.byteLength || data.length || 'unknown size', 'bytes');
+      console.log('Audio data type:', typeof data, 'Constructor:', data.constructor.name);
+      
       if (audioActive && audioContext) {
         try {
           playAudioChunk(data);
@@ -2533,6 +2480,14 @@ function initWebSocket() {
           console.error('Audio playback error:', e);
         }
       }
+    });
+    
+    socket.on('test_event', function(data) {
+      console.log('✅ Socket.IO test event received:', data);
+    });
+    
+    socket.on('test_binary', function(data) {
+      console.log('✅ Binary test received:', typeof data, data.constructor.name, 'Length:', data.byteLength || data.length);
     });
     
     return socket;
@@ -2550,82 +2505,58 @@ async function initWebRTC() {
       throw new Error('WebRTC not supported in browser');
     }
     
-    // Check if server supports WebRTC
-    const testResponse = await fetch('/webrtc/offer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ test: true })
-    });
-    
-    if (!testResponse.ok) {
-      throw new Error('WebRTC not available on server');
+    // Check if getUserMedia is available for microphone access
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('getUserMedia not available');
     }
     
     updateMicStatus('Setting up WebRTC...');
+    
+    // Get microphone stream from browser (not server ALSA!)
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        sampleRate: 16000,
+        channelCount: 1,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
     
     // Create peer connection
     webrtcPeer = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
     
-    // Handle incoming audio stream
-    webrtcPeer.ontrack = function(event) {
-      console.log('Received WebRTC audio track');
-      const audioEl = document.getElementById('audio-playback');
-      if (audioEl && event.streams[0]) {
-        audioEl.srcObject = event.streams[0];
-        updateMicStatus('WebRTC audio active');
-        updateAudioQuality('WebRTC Active');
-      }
-    };
+    // Add microphone stream to peer connection
+    stream.getTracks().forEach(track => {
+      webrtcPeer.addTrack(track, stream);
+    });
     
+    // Handle connection state changes
     webrtcPeer.onconnectionstatechange = function() {
       console.log('WebRTC connection state:', webrtcPeer.connectionState);
       updateMicStatus('WebRTC: ' + webrtcPeer.connectionState);
       
       if (webrtcPeer.connectionState === 'connected') {
-        updateAudioQuality('WebRTC Connected');
-        console.log('WebRTC connection established successfully');
-      } else if (webrtcPeer.connectionState === 'disconnected') {
-        console.log('WebRTC connection disconnected');
-        updateAudioQuality('WebRTC Disconnected');
-      } else if (webrtcPeer.connectionState === 'failed') {
-        console.log('WebRTC connection failed - will fallback to WebSocket');
-        updateAudioQuality('WebRTC Failed');
-        audioActive = false;
-        updateMicButton();
-        // Automatically try WebSocket fallback
-        setTimeout(async () => {
-          console.log('Auto-fallback to WebSocket audio...');
-          updateAudioQuality('WebSocket Mode');
-          const success = await startWebSocketAudio();
-          if (success) {
-            audioActive = true;
-            vuMeterActive = true;
-            updateMicStatus('Audio streaming active (WebSocket fallback)');
-            updateMicButton();
-          }
-        }, 1000);
+        updateMicStatus('WebRTC connected');
+      } else if (webrtcPeer.connectionState === 'disconnected' || 
+                 webrtcPeer.connectionState === 'failed') {
+        updateMicStatus('WebRTC: ' + webrtcPeer.connectionState);
+        // Don't auto-fallback here, let toggleMicrophone handle it
       }
     };
     
-    // Add ICE connection state monitoring
     webrtcPeer.oniceconnectionstatechange = function() {
       console.log('ICE connection state:', webrtcPeer.iceConnectionState);
-      if (webrtcPeer.iceConnectionState === 'failed') {
-        console.log('ICE connection failed - this may cause WebRTC failure');
-      } else if (webrtcPeer.iceConnectionState === 'connected') {
-        console.log('ICE connection established successfully');
-      }
     };
     
-    // Add data channel error monitoring
     webrtcPeer.onicegatheringstatechange = function() {
       console.log('ICE gathering state:', webrtcPeer.iceGatheringState);
     };
     
     // Create offer
-    const offer = await webrtcPeer.createOffer({ offerToReceiveAudio: true });
+    const offer = await webrtcPeer.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
     await webrtcPeer.setLocalDescription(offer);
     
     // Send offer to server
@@ -2650,7 +2581,7 @@ async function initWebRTC() {
     }
     
   } catch (e) {
-    console.error('WebRTC init error:', e);
+    console.log('WebRTC init error:', e);
     updateMicStatus('WebRTC failed: ' + e.message);
     return false;
   }
@@ -2678,18 +2609,238 @@ async function startWebSocketAudio() {
   }
 }
 
-function playAudioChunk(audioData) {
-  // Simple audio playback for WebSocket fallback
+// FIXED Audio streaming functions
+function initWebAudio() {
   try {
-    if (audioContext && audioData) {
-      // This is a simplified implementation
-      // In a full implementation, you'd properly decode the PCM data
-      console.log('Playing audio chunk:', audioData.length, 'bytes');
+    if (audioContext) return true;
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 22050,
+      latencyHint: 'interactive'
+    });
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
     }
+    console.log('Audio context initialized:', audioContext.sampleRate, 'Hz');
+    return true;
   } catch (e) {
-    console.error('Audio chunk playback error:', e);
+    console.error('Web Audio initialization failed:', e);
+    return false;
   }
 }
+
+// Initialize audio buffering system with adaptive queue management
+if (!window.audioBufferSystem) {
+  window.audioBufferSystem = {
+    bufferQueue: [],
+    isPlaying: false,
+    nextStartTime: 0,
+    sampleRate: 22050,
+    chunkDuration: 0.093, // ~2048 samples at 22050 Hz
+    maxQueueSize: 3, // Maximum buffered chunks for low latency
+    targetQueueSize: 2, // Ideal queue size
+    lastCleanup: 0
+  };
+}
+
+// Enhanced playAudioChunk function with proper buffering
+function playAudioChunk(audioData) {
+  let chunkNumber = (window.audioChunkCounter || 0) + 1;
+  window.audioChunkCounter = chunkNumber;
+  
+  if (!audioActive || !audioContext) {
+    console.log('Audio not active or context missing', {audioActive, audioContextState: audioContext?.state});
+    return;
+  }
+  
+  try {
+    let arrayBuffer;
+    
+    // Handle server format: {data: 'base64string', format: 'pcm_s16le_22050_mono'}
+    if (audioData && typeof audioData === 'object' && audioData.data && typeof audioData.data === 'string') {
+      if (chunkNumber === 1 || chunkNumber % 50 === 0) {
+        console.log(`Decoding base64 audio data: ${audioData.data.length} chars, format: ${audioData.format}`);
+      }
+      
+      // Decode base64 to binary string
+      const binaryString = atob(audioData.data);
+      
+      // Convert binary string to ArrayBuffer
+      arrayBuffer = new ArrayBuffer(binaryString.length);
+      const uint8Array = new Uint8Array(arrayBuffer);
+      for (let i = 0; i < binaryString.length; i++) {
+        uint8Array[i] = binaryString.charCodeAt(i);
+      }
+    }
+    // Handle raw ArrayBuffer
+    else if (audioData instanceof ArrayBuffer) {
+      arrayBuffer = audioData;
+    }
+    // Handle typed arrays
+    else if (audioData.buffer && audioData.buffer instanceof ArrayBuffer) {
+      arrayBuffer = audioData.buffer.slice(audioData.byteOffset, audioData.byteOffset + audioData.byteLength);
+    }
+    else {
+      console.error('Unsupported audio data format:', audioData);
+      return;
+    }
+    
+    // Filter small test packets
+    if (arrayBuffer.byteLength < 100) {
+      return; // Skip tiny packets completely
+    }
+    
+    // Ensure even byte length for Int16Array
+    let processBuffer = arrayBuffer;
+    if (arrayBuffer.byteLength % 2 !== 0) {
+      processBuffer = new ArrayBuffer(arrayBuffer.byteLength + 1);
+      new Uint8Array(processBuffer).set(new Uint8Array(arrayBuffer));
+    }
+    
+    // Convert to 16-bit PCM samples
+    const samples = new Int16Array(processBuffer);
+    const floatSamples = new Float32Array(samples.length);
+    
+    // Apply gain boost and convert to float
+    const gain = 2.0; // Reduced gain to prevent distortion
+    let sumSquares = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const sample = (samples[i] / 32768.0) * gain;
+      floatSamples[i] = Math.max(-1, Math.min(1, sample)); // Clamp
+      sumSquares += sample * sample;
+    }
+    
+    // Calculate RMS for VU meter
+    const rms = Math.sqrt(sumSquares / samples.length);
+    
+    // Add to buffer queue with adaptive queue management
+    const bufferSystem = window.audioBufferSystem;
+    
+    // Prevent queue buildup - drop old chunks if queue is too long
+    if (bufferSystem.bufferQueue.length >= bufferSystem.maxQueueSize) {
+      const droppedChunks = bufferSystem.bufferQueue.length - bufferSystem.targetQueueSize + 1;
+      bufferSystem.bufferQueue.splice(0, droppedChunks);
+      if (chunkNumber % 25 === 0) {
+        console.log(`🚨 Dropped ${droppedChunks} old audio chunks to prevent delay buildup`);
+      }
+    }
+    
+    bufferSystem.bufferQueue.push({
+      samples: floatSamples,
+      rms: rms,
+      chunkNumber: chunkNumber,
+      timestamp: audioContext.currentTime
+    });
+    
+    // Start playback if not already playing
+    if (!bufferSystem.isPlaying) {
+      startBufferedPlayback();
+    }
+    
+    // Update VU meter
+    if (typeof updateVUMeter === 'function') {
+      updateVUMeter(rms * 100); // Convert to percentage
+    }
+    
+    // Debug logging with queue health monitoring
+    if (chunkNumber % 25 === 0) {
+      let rmsLabel = 'SILENT';
+      if (rms > 0.01) rmsLabel = 'GOOD AUDIO';
+      else if (rms > 0.005) rmsLabel = 'Weak';
+      else if (rms > 0.001) rmsLabel = 'Very Weak';
+      
+      const queueSize = bufferSystem.bufferQueue.length;
+      const queueStatus = queueSize <= bufferSystem.targetQueueSize ? '✅' : 
+                         queueSize <= bufferSystem.maxQueueSize ? '⚠️' : '🚨';
+      
+      console.log(`Audio chunk ${chunkNumber}: ${arrayBuffer.byteLength} bytes → ${samples.length} samples, RMS: ${rms.toFixed(4)} (${rmsLabel}), Queue: ${queueSize} ${queueStatus}`);
+    }
+    
+  } catch (e) {
+    console.error('playAudioChunk error:', e);
+  }
+}
+
+// Buffered playback system with adaptive latency control
+function startBufferedPlayback() {
+  const bufferSystem = window.audioBufferSystem;
+  if (bufferSystem.isPlaying) return;
+  
+  bufferSystem.isPlaying = true;
+  bufferSystem.nextStartTime = audioContext.currentTime + 0.05; // Minimal initial delay
+  
+  // Create and configure audio gain node
+  if (!window.audioGainNode) {
+    window.audioGainNode = audioContext.createGain();
+    window.audioGainNode.connect(audioContext.destination);
+    window.audioGainNode.gain.value = 2.0; // Reduced gain
+    console.log('Created audioGainNode with 2x volume boost');
+  }
+  
+  scheduleNextBuffer();
+}
+
+function scheduleNextBuffer() {
+  const bufferSystem = window.audioBufferSystem;
+  
+  if (!audioActive || !audioContext || bufferSystem.bufferQueue.length === 0) {
+    bufferSystem.isPlaying = false;
+    return;
+  }
+  
+  try {
+    // Resume audio context if suspended
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
+    
+    // Adaptive scheduling based on queue size
+    const queueSize = bufferSystem.bufferQueue.length;
+    let scheduleDelay = 50; // Default 50ms
+    
+    if (queueSize > bufferSystem.maxQueueSize) {
+      // Queue too long - speed up processing
+      scheduleDelay = 20;
+    } else if (queueSize < 1) {
+      // Queue empty - slow down to prevent starvation
+      scheduleDelay = 80;
+    }
+    
+    // Get next buffer from queue
+    const audioData = bufferSystem.bufferQueue.shift();
+    
+    // Create audio buffer
+    const audioBuffer = audioContext.createBuffer(1, audioData.samples.length, 22050);
+    audioBuffer.copyToChannel(audioData.samples, 0);
+    
+    // Create and schedule source
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(window.audioGainNode);
+    
+    // Adaptive start time to prevent delay buildup
+    const currentTime = audioContext.currentTime;
+    let startTime = Math.max(bufferSystem.nextStartTime, currentTime + 0.01);
+    
+    // If we're falling behind, catch up by reducing gap
+    if (queueSize > bufferSystem.targetQueueSize) {
+      startTime = Math.max(currentTime + 0.005, bufferSystem.nextStartTime - 0.02);
+    }
+    
+    source.start(startTime);
+    
+    // Update next start time
+    bufferSystem.nextStartTime = startTime + audioBuffer.duration;
+    
+    // Schedule next buffer with adaptive timing
+    setTimeout(scheduleNextBuffer, scheduleDelay);
+    
+  } catch (e) {
+    console.error('Buffer scheduling error:', e);
+    bufferSystem.isPlaying = false;
+  }
+}
+
+
 
 async function toggleMicrophone() {
   try {
@@ -2709,32 +2860,49 @@ async function toggleMicrophone() {
       }
       
       updateMicStatus('Audio stopped');
-      updateAudioQuality('Ready');
       vuMeterActive = false;
       
     } else {
       // Start audio streaming
       updateMicStatus('Starting audio...');
       
-      let success = false;
-      
-      // Try WebRTC first (best quality)
-      if (window.RTCPeerConnection) {
-        try {
-          success = await initWebRTC();
-          if (success) {
-            updateAudioQuality('WebRTC Mode');
-          }
-        } catch (e) {
-          console.error('WebRTC initialization failed:', e);
-          updateMicStatus('WebRTC failed, trying WebSocket...');
-        }
+      // Initialize audio context first
+      if (!audioContext) {
+        initWebAudio();
       }
       
-      // Fallback to WebSocket
+      let success = false;
+      
+      // Try WebRTC first (browser microphone to server)
+      updateMicStatus('Setting up WebRTC...');
+      try {
+        success = await initWebRTC();
+        if (success) {
+          updateMicStatus('WebRTC connected');
+        }
+      } catch (e) {
+        console.log('WebRTC failed:', e.message);
+        updateMicStatus('WebRTC failed: ' + e.message);
+      }
+      
+      // Fallback to WebSocket if WebRTC fails (server microphone to browser)
       if (!success) {
-        updateAudioQuality('WebSocket Mode');
-        success = await startWebSocketAudio();
+        updateMicStatus('WebRTC failed - will fallback to WebSocket');
+        console.log('Auto-fallback to WebSocket audio...');
+        try {
+          if (!socket) {
+            socket = initWebSocket();
+          }
+          if (socket) {
+            console.log('Emitting start_simple_audio to server...');
+            socket.emit('start_simple_audio');
+            updateMicStatus('Starting WebSocket audio...');
+            success = true;
+          }
+        } catch (e) {
+          console.error('WebSocket audio setup failed:', e);
+          updateMicStatus('WebSocket setup failed: ' + e.message);
+        }
       }
       
       if (success) {
@@ -2743,7 +2911,6 @@ async function toggleMicrophone() {
         updateMicStatus('Audio streaming active');
       } else {
         updateMicStatus('Failed to start audio');
-        updateAudioQuality('Error');
       }
     }
     
@@ -2824,47 +2991,7 @@ async function testMic() {
 let muted = false;
 let socketConnected = false;
 
-// Initialize Socket.IO connection
-function initializeSocket() {
-  try {
-    socket = io();
-    
-    socket.on('connect', function() {
-      socketConnected = true;
-      console.log('Socket.IO connected:', socket.id);
-      log('WebSocket connected - All systems ready');
-    });
-    
-    socket.on('disconnect', function() {
-      socketConnected = false;
-      console.log('Socket.IO disconnected');
-      log('WebSocket disconnected - Reconnecting...');
-    });
-    
-    socket.on('connect_error', function(error) {
-      console.error('Socket.IO connection error:', error);
-      log('WebSocket connection failed: ' + error.message);
-    });
-    
-    socket.on('audio_status', function(data) {
-      console.log('Audio status:', data);
-      if (data.status === 'started') {
-        vuMeterActive = true;
-        log('Audio streaming started');
-      } else if (data.status === 'stopped') {
-        vuMeterActive = false;
-        log('Audio streaming stopped');
-      } else if (data.status === 'error') {
-        vuMeterActive = false;
-        log('Audio error: ' + (data.message || 'unknown'));
-      }
-    });
-    
-  } catch (e) {
-    console.error('Socket.IO initialization failed:', e);
-    log('WebSocket initialization failed: ' + e.message);
-  }
-}
+
 
 async function setVol(v) { 
   try {
@@ -2989,12 +3116,137 @@ document.addEventListener('keyup', function(e) {
   }
 });
 
+// ---- Mumble Functions ----
+async function connectMumble() {
+  try {
+    const serverEl = document.getElementById('mumble_server');
+    const portEl = document.getElementById('mumble_port');
+    const usernameEl = document.getElementById('mumble_username');
+    
+    if (!serverEl || !serverEl.value) {
+      log('Please enter a Mumble server IP');
+      return;
+    }
+    
+    const server = serverEl.value;
+    const port = portEl ? parseInt(portEl.value) || 64738 : 64738;
+    const username = usernameEl ? usernameEl.value || 'AvatarTank' : 'AvatarTank';
+    
+    log('Connecting to Mumble server...');
+    
+    const response = await fetch('/mumble/connect', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        server_ip: server,
+        port: port,
+        username: username
+      })
+    });
+    
+    const result = await response.json();
+    
+    if (result.ok) {
+      log('Mumble connected successfully');
+      updateMumbleStatus();
+    } else {
+      log('Mumble connection failed: ' + result.msg);
+    }
+  } catch (e) {
+    log('Mumble connection error: ' + e.message);
+  }
+}
+
+async function disconnectMumble() {
+  try {
+    log('Disconnecting from Mumble...');
+    
+    const response = await fetch('/mumble/disconnect', {
+      method: 'POST'
+    });
+    
+    const result = await response.json();
+    
+    if (result.ok) {
+      log('Mumble disconnected');
+      updateMumbleStatus();
+    } else {
+      log('Mumble disconnection failed: ' + result.msg);
+    }
+  } catch (e) {
+    log('Mumble disconnection error: ' + e.message);
+  }
+}
+
+async function toggleMumbleMute() {
+  try {
+    const response = await fetch('/mumble/toggle_mute', {
+      method: 'POST'
+    });
+    
+    const result = await response.json();
+    
+    if (result.ok) {
+      const btn = document.getElementById('mumble_mute_btn');
+      if (btn) {
+        btn.textContent = result.muted ? '🔇' : '🔊';
+        btn.style.background = result.muted ? '#f00' : '';
+      }
+      log(result.muted ? 'Mumble muted' : 'Mumble unmuted');
+      updateMumbleStatus();
+    } else {
+      log('Mumble mute toggle failed: ' + result.msg);
+    }
+  } catch (e) {
+    log('Mumble mute toggle error: ' + e.message);
+  }
+}
+
+async function updateMumbleStatus() {
+  try {
+    const response = await fetch('/mumble/status');
+    const status = await response.json();
+    
+    const statusEl = document.getElementById('mumble_status');
+    if (statusEl) {
+      if (status.connected && status.process_running) {
+        statusEl.textContent = 'Connected';
+        statusEl.style.color = '#44ff44';
+      } else if (status.process_running) {
+        statusEl.textContent = 'Connecting...';
+        statusEl.style.color = '#ffaa00';
+      } else {
+        statusEl.textContent = 'Disconnected';
+        statusEl.style.color = '#ff4444';
+      }
+    }
+    
+    // Update button states
+    const connectBtn = document.getElementById('mumble_connect_btn');
+    const disconnectBtn = document.getElementById('mumble_disconnect_btn');
+    const muteBtn = document.getElementById('mumble_mute_btn');
+    
+    if (connectBtn) connectBtn.disabled = status.connected;
+    if (disconnectBtn) disconnectBtn.disabled = !status.connected;
+    if (muteBtn) {
+      muteBtn.disabled = !status.connected;
+      muteBtn.textContent = status.muted ? '🔇' : '🔊';
+      muteBtn.style.background = status.muted ? '#f00' : '';
+    }
+  } catch (e) {
+    console.error('Mumble status update error:', e);
+  }
+}
+
+// Update Mumble status periodically
+setInterval(updateMumbleStatus, 5000);
+
 function init() {
   try {
     log('Initializing Avatar Tank Enhanced System...');
     
     // Initialize Socket.IO connection first
-    initializeSocket();
+    initWebSocket();
     
     setLang('en'); 
     batt(); 
@@ -3008,6 +3260,10 @@ function init() {
     
     setInterval(updateBandwidth, 100); // More frequent bandwidth updates
     setInterval(enhancedVUMeter, 50); // Smooth VU meter updates
+    
+    // Initialize Mumble status
+    updateMumbleStatus();
+    setInterval(updateMumbleStatus, 5000);
     
     // Video stream monitoring
     setInterval(function() { 
