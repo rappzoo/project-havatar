@@ -16,23 +16,6 @@ import numpy as np
 import re
 import glob
 
-# WebRTC imports - made optional to prevent startup failures
-WEBRTC_AVAILABLE = False
-try:
-    import asyncio
-    from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
-    from aiortc.contrib.media import MediaPlayer
-    WEBRTC_AVAILABLE = True
-    print("[WebRTC] aiortc available - WebRTC audio streaming enabled")
-except ImportError as e:
-    print(f"[WebRTC] aiortc not available - using WebSocket fallback only: {e}")
-    print("[WebRTC] To install: pip install aiortc")
-    # Define dummy classes to prevent NameError
-    class RTCPeerConnection: pass
-    class RTCSessionDescription: pass
-    class MediaStreamTrack: pass
-    class MediaPlayer: pass
-
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
@@ -236,7 +219,7 @@ print(f"  Motor: {MOTOR_PORT}")
 os.environ['AV_MIC'] = MIC_PLUG
 os.environ['AV_SPK'] = SPK_PLUG
 
-# ============== CAMERA SETTINGS (Enhanced) ==============
+# ============== CAMERA SETTINGS ==============
 current_resolution = "720p"
 camera_settings = {
     "480p": {"width": 640, "height": 480, "fps": 30},
@@ -411,10 +394,7 @@ class MotorController:
 
 motors = MotorController()
 
-# ============== Keep all your existing TTS, recording, audio, and other classes unchanged ==============
-# [Include all the rest of your original code - PiperTTS, PipeRecorder, audio functions, etc.]
-
-# Copy the rest of your original avatar_tank_audio.py from the PiperTTS class onwards...
+# ============== TTS ==============
 class PiperTTS:
     def __init__(self):
         self.languages = {
@@ -423,7 +403,7 @@ class PiperTTS:
             'de': {'name': 'Deutsch', 'dir': '/home/havatar/piper/models/de'},
         }
         self.current_language='en'
-        self.bin, self.kind = self._find_piper_bin()  # ('/path/to/piper-cli', 'cli') or ('/path/to/piper', 'piper') or (None,None)
+        self.bin, self.kind = self._find_piper_bin()
 
     def _find_piper_bin(self):
         # prefer piper-cli, then piper
@@ -544,7 +524,6 @@ def generate_frames():
                 print("[Video] read failed, reinit..."); init_camera(); time.sleep(1); continue
 
             h,w = frame.shape[:2]
-            # Remove all OpenCV text overlays - info is now shown in UI info bar
 
             with _last_lock:
                 _last_bgr = frame.copy()
@@ -556,7 +535,7 @@ def generate_frames():
         except Exception as e:
             print("[Video] error:", e); time.sleep(1)
 
-# ============== Recording via pipe (no second /dev/video open) ==============
+# ============== Recording via pipe ==============
 class PipeRecorder:
     def __init__(self):
         self.proc=None
@@ -564,27 +543,154 @@ class PipeRecorder:
         self.running=False
         self.lock=threading.Lock()
         self.last_file=None
+        self.fallback_mode = False  # Flag for fallback recording mode
 
     def is_recording(self): return self.running and self.proc and self.proc.poll() is None
 
-    def _spawn_ffmpeg(self, w,h,fps,out,a_bitrate="96k"):
-        # Use a separate microphone instance for recording to avoid conflicts
-        # Try to use a different ALSA device or add buffer settings
-        rec_mic_device = MIC_PLUG if MIC_PLUG.startswith('plughw:') else f"plughw:{MIC_PLUG.split(':')[-1] if ':' in MIC_PLUG else '0,0'}"
+    def _test_audio_device(self, device):
+        """Test if an audio device is accessible"""
+        try:
+            # Use arecord to test the device
+            cmd = ["arecord", "-D", device, "-f", "cd", "-d", "1", "-q", "/dev/null"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            success = result.returncode == 0
+            if success:
+                print(f"[Recorder] Device test PASSED for {device}")
+            else:
+                print(f"[Recorder] Device test FAILED for {device}: {result.stderr}")
+            return success
+        except subprocess.TimeoutExpired:
+            print(f"[Recorder] Device test TIMEOUT for {device}")
+            return False
+        except Exception as e:
+            print(f"[Recorder] Device test ERROR for {device}: {e}")
+            return False
+
+    def _is_device_in_use(self, device):
+        """Check if an audio device is currently in use by another process"""
+        try:
+            # Extract card and device numbers from the device string
+            # e.g., "plughw:2,0" -> card=2, device=0
+            import re
+            match = re.search(r'(\d+),(\d+)', device)
+            if match:
+                card, dev = match.groups()
+                # Check if the device is in use by looking at /proc/asound/
+                # This is a simple check - in practice, you might want to check more thoroughly
+                print(f"[Recorder] Checking if device hw:{card},{dev} is in use...")
+                # For now, we'll just return False to allow testing
+                # In a real implementation, you'd check for processes using this device
+                return False
+            else:
+                print(f"[Recorder] Could not parse device {device} for in-use check")
+                return False
+        except Exception as e:
+            print(f"[Recorder] Device in-use check ERROR for {device}: {e}")
+            return False
+
+    def _get_available_audio_devices(self):
+        """Get a list of available audio devices"""
+        devices = []
+        try:
+            # Parse the output of arecord -l to get available devices
+            result = subprocess.run(['arecord', '-l'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                lines = result.stdout.split('\n')
+                for line in lines:
+                    # Look for lines like "card 2: Device [USB Audio Device], device 0: USB Audio [USB Audio]"
+                    import re
+                    match = re.search(r'card\s+(\d+):.*device\s+(\d+):', line)
+                    if match:
+                        card, device = match.groups()
+                        # Add several variations of the device name
+                        devices.append(f"plughw:{card},{device}")
+                        devices.append(f"hw:{card},{device}")
+        except Exception as e:
+            print(f"[Recorder] Error getting available audio devices: {e}")
         
-        cmd = [
-            "ffmpeg","-hide_banner","-loglevel","warning","-nostdin",
-            "-f","rawvideo","-pix_fmt","bgr24","-s",f"{w}x{h}","-r",str(fps),"-i","-",
-            # Enhanced audio capture settings to avoid conflicts
-            "-thread_queue_size","2048","-f","alsa","-channels","1","-sample_rate","44100",
-            "-buffer_size","8192","-i",rec_mic_device,
-            "-c:v","libx264","-preset","veryfast","-crf","23","-pix_fmt","yuv420p",
-            "-c:a","aac","-b:a",a_bitrate,"-ar","44100","-ac","1",
-            "-shortest","-movflags","+faststart",
-            out
-        ]
-        logf = open(os.path.join("recordings","ffmpeg_record.log"),"ab",buffering=0)
-        return subprocess.Popen(cmd, stdin=PIPE, stdout=logf, stderr=logf)
+        # Always include the current MIC_PLUG and some common defaults
+        if MIC_PLUG not in devices:
+            devices.append(MIC_PLUG)
+        if "default" not in devices:
+            devices.append("default")
+        if "sysdefault" not in devices:
+            devices.append("sysdefault")
+            
+        return devices
+
+    def _spawn_ffmpeg(self, w,h,fps,out,a_bitrate="96k"):
+        # Enhanced approach to avoid audio device conflicts
+        # Try multiple strategies for audio capture
+        
+        if self.fallback_mode:
+            # Fallback mode: Record video only without audio
+            print("[Recorder] Using fallback mode - recording video only")
+            cmd = [
+                "ffmpeg","-hide_banner","-loglevel","warning","-nostdin",
+                "-f","rawvideo","-pix_fmt","bgr24","-s",f"{w}x{h}","-r",str(fps),"-i","-",
+                "-c:v","libx264","-preset","veryfast","-crf","23","-pix_fmt","yuv420p",
+                "-an",  # No audio stream
+                "-movflags","+faststart",
+                out
+            ]
+            logf = open(os.path.join("recordings","ffmpeg_record.log"),"ab",buffering=0)
+            return subprocess.Popen(cmd, stdin=PIPE, stdout=logf, stderr=logf)
+        
+        # Normal mode: Try to record with audio
+        # Use the actual detected microphone device directly
+        # This uses the globally defined MIC_PLUG which is detected at startup
+        print(f"[Recorder] Current MIC_PLUG device: {MIC_PLUG}")
+        
+        # Test the actual device first
+        if self._test_audio_device(MIC_PLUG):
+            print(f"[Recorder] Device {MIC_PLUG} is accessible")
+        else:
+            print(f"[Recorder] Warning: Device {MIC_PLUG} may not be accessible")
+        
+        # Get a list of available audio devices to try
+        available_devices = self._get_available_audio_devices()
+        print(f"[Recorder] Available audio devices: {available_devices}")
+        
+        # Strategy: Try all available devices in order of preference
+        # Start with the detected device, then try others
+        device_candidates = [MIC_PLUG] + [d for d in available_devices if d != MIC_PLUG]
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        device_candidates = [d for d in device_candidates if not (d in seen or seen.add(d))]
+        
+        print(f"[Recorder] Device candidates to try: {device_candidates}")
+        
+        # Test each device before using it
+        for device in device_candidates:
+            if self._test_audio_device(device):
+                print(f"[Recorder] Will attempt to use device: {device}")
+                try:
+                    print(f"[Recorder] Trying audio device: {device}")
+                    cmd = [
+                        "ffmpeg","-hide_banner","-loglevel","warning","-nostdin",
+                        "-f","rawvideo","-pix_fmt","bgr24","-s",f"{w}x{h}","-r",str(fps),"-i","-",
+                        # Enhanced audio capture settings with larger buffers
+                        "-thread_queue_size","8192","-f","alsa","-channels","1","-sample_rate","44100",
+                        "-i",device,
+                        "-c:v","libx264","-preset","veryfast","-crf","23","-pix_fmt","yuv420p",
+                        "-c:a","aac","-b:a",a_bitrate,"-ar","44100","-ac","1",
+                        "-shortest","-movflags","+faststart",
+                        out
+                    ]
+                    logf = open(os.path.join("recordings","ffmpeg_record.log"),"ab",buffering=0)
+                    process = subprocess.Popen(cmd, stdin=PIPE, stdout=logf, stderr=logf)
+                    print(f"[Recorder] Successfully using device for recording: {device}")
+                    return process
+                except Exception as e:
+                    print(f"[Recorder] Failed to use device ({device}): {e}")
+            else:
+                print(f"[Recorder] Skipping device ({device}) - test failed")
+        
+        # If all strategies fail, switch to fallback mode
+        print("[Recorder] All audio devices failed, switching to fallback mode (video only)")
+        self.fallback_mode = True
+        return self._spawn_ffmpeg(w, h, fps, out, a_bitrate)
 
     def _writer(self, fps, w, h):
         frame_period = 1.0/float(fps or 15)
@@ -607,17 +713,23 @@ class PipeRecorder:
         with self.lock:
             if self.is_recording():
                 return {"ok":True,"msg":"already recording","file":self.last_file}
+            # Reset fallback mode for each recording attempt
+            self.fallback_mode = False
             s = camera_settings.get(current_resolution, {"width":1280,"height":720,"fps":15})
             w,h,fps = s["width"], s["height"], s["fps"]
             with _last_lock:
                 if _last_sz != (0,0): w,h = _last_sz
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             out = os.path.join("recordings", f"rec_{ts}.mp4")
-            self.proc = self._spawn_ffmpeg(w,h,fps,out,a_bitrate=a_bitrate)
-            self.running=True; self.last_file=out
-            self.thread = threading.Thread(target=self._writer, args=(fps,w,h), daemon=True)
-            self.thread.start()
-            return {"ok":True,"msg":"recording started","file":out}
+            try:
+                self.proc = self._spawn_ffmpeg(w,h,fps,out,a_bitrate=a_bitrate)
+                self.running=True; self.last_file=out
+                self.thread = threading.Thread(target=self._writer, args=(fps,w,h), daemon=True)
+                self.thread.start()
+                mode_msg = " (video only)" if self.fallback_mode else ""
+                return {"ok":True,"msg":f"recording started{mode_msg}","file":out, "audio": not self.fallback_mode}
+            except Exception as e:
+                return {"ok":False,"msg":f"failed to start recording: {str(e)}","file":None}
 
     def stop(self):
         with self.lock:
@@ -632,6 +744,8 @@ class PipeRecorder:
                     self.proc.terminate()
                     try: self.proc.wait(timeout=5)
                     except subprocess.TimeoutExpired: self.proc.kill()
+            except Exception as e:
+                print(f"[Recorder] Error stopping process: {e}")
             finally:
                 self.proc=None
             return {"ok":True,"msg":"recording stopped","file":self.last_file}
@@ -641,7 +755,7 @@ class PipeRecorder:
 
 rec = PipeRecorder()
 
-# ============== ALSA volume/mute helpers (same endpoints you tested) ==============
+# ============== ALSA volume/mute helpers ==============
 def _parse_aplay_l():
     try:
         out = subprocess.run(["aplay","-l"], capture_output=True, text=True).stdout
@@ -666,16 +780,19 @@ def _amixer_controls(card_str):
         if p.returncode!=0: return []
         return [line.split("'")[1] for line in p.stdout.splitlines() if "Simple mixer control" in line and "'" in line]
     except: return []
+
 def _pick_playback_ctrl():
     prefs=["Speaker","PCM","Master","Playback"]; cs=_amixer_controls(SPK_PLUG)
     for n in prefs:
         if n in cs: return n
     return cs[0] if cs else None
+
 def _pick_capture_ctrl():
     prefs=["Mic","Capture","Input"]; cs=_amixer_controls(MIC_PLUG)
     for n in prefs:
         if n in cs: return n
     return cs[0] if cs else None
+
 def _set_volume(card_str,ctrl,pct,mute=None):
     m=re.search(r":(\d+),", card_str); card = m.group(1) if m else "0"
     if ctrl is None: return {"ok":False,"msg":f"no control on card {card}"}
@@ -686,6 +803,7 @@ def _set_volume(card_str,ctrl,pct,mute=None):
     p=subprocess.run(args,capture_output=True,text=True)
     if p.returncode!=0: return {"ok":False,"msg":p.stderr.strip() or "amixer failed"}
     return {"ok":True,"msg":"ok"}
+
 def _get_volume(card_str,ctrl):
     m=re.search(r":(\d+),", card_str); card = m.group(1) if m else "0"
     if ctrl is None: return {"ok":False,"msg":f"no control on card {card}"}
@@ -694,23 +812,6 @@ def _get_volume(card_str,ctrl):
     m2=re.search(r"\[(\d{1,3})%\]", p.stdout); vol=int(m2.group(1)) if m2 else None
     muted="off" in p.stdout.lower()
     return {"ok":True,"control":ctrl,"volume":vol,"muted":muted}
-
-# ============== Mic streaming (AAC/ADTS) ==============
-def _ffmpeg_mic_proc():
-    cmd = [
-        "ffmpeg","-hide_banner","-loglevel","error","-nostdin",
-        "-thread_queue_size","64",  # Minimal queue for ultra-low latency
-        "-f","alsa","-i",MIC_PLUG,
-        "-ac","1","-ar","16000",  # 16kHz optimal for voice
-        "-c:a","pcm_u8",  # Fastest codec
-        "-f","wav","-fflags","+nobuffer+flush_packets+discardcorrupt",
-        "-flags","low_delay","-avoid_negative_ts","disabled",
-        "-max_delay","0","-buffer_size","256",  # Ultra-small buffer
-        "-probesize","32","-analyzeduration","0",
-        "-use_wallclock_as_timestamps","1",
-        "-"
-    ]
-    return subprocess.Popen(cmd, stdout=PIPE, stderr=subprocess.DEVNULL, bufsize=0)
 
 # ============== Prediction service ==============
 class SimplePredict:
@@ -859,9 +960,99 @@ class SimplePredict:
 
 _predict = SimplePredict()
 
+# ============== WebSocket Audio Streaming ==============
+websocket_active = False
+websocket_process = None
+
+@socketio.on('start_simple_audio')
+def handle_start_simple_audio():
+    global websocket_active, websocket_process
+    
+    if websocket_active:
+        emit('audio_status', {'status': 'already_active'})
+        return
+    
+    try:
+        websocket_active = True
+        
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-f", "alsa", "-i", MIC_PLUG,
+            "-acodec", "pcm_s16le", "-ar", "22050", "-ac", "1",
+            "-f", "s16le", "-"  # Raw PCM output
+        ]
+        
+        websocket_process = subprocess.Popen(cmd, stdout=PIPE, stderr=subprocess.DEVNULL, bufsize=1024)
+        
+        def audio_worker():
+            import base64
+            try:
+                while websocket_active and websocket_process:
+                    chunk = websocket_process.stdout.read(2048)
+                    if not chunk:
+                        break
+                    # Encode as base64 for JSON transport
+                    chunk_b64 = base64.b64encode(chunk).decode('ascii')
+                    socketio.emit('audio_data', {
+                        'data': chunk_b64,
+                        'format': 'pcm_s16le_22050_mono'
+                    })
+            except Exception as e:
+                print(f"[SimpleAudio] Error: {e}")
+            finally:
+                if websocket_process:
+                    try:
+                        websocket_process.terminate()
+                    except:
+                        pass
+        
+        thread = threading.Thread(target=audio_worker, daemon=True)
+        thread.start()
+        
+        emit('audio_status', {'status': 'started', 'format': 'pcm_s16le_22050_mono'})
+        print(f"[SimpleAudio] Started for client {request.sid}")
+        
+    except Exception as e:
+        websocket_active = False
+        emit('audio_status', {'status': 'error', 'message': str(e)})
+        print(f"[SimpleAudio] Error: {e}")
+
+@socketio.on('stop_simple_audio')
+def handle_stop_simple_audio():
+    global websocket_active, websocket_process
+    
+    try:
+        websocket_active = False
+        
+        if websocket_process:
+            try:
+                websocket_process.terminate()
+                websocket_process.wait(timeout=2)
+            except:
+                try:
+                    websocket_process.kill()
+                except:
+                    pass
+            websocket_process = None
+        
+        emit('audio_status', {'status': 'stopped'})
+        print(f"[SimpleAudio] Stopped for client {request.sid}")
+        
+    except Exception as e:
+        emit('audio_status', {'status': 'error', 'message': str(e)})
+        print(f"[SimpleAudio] Error: {e}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    global websocket_active
+    if websocket_active:
+        handle_stop_simple_audio()
+    print(f"[WebSocket] Client {request.sid} disconnected")
+
 # ------------- Routes -------------
 @app.route('/video')
-def video(): return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+def video(): 
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/set_resolution', methods=['POST'])
 def set_resolution():
@@ -904,7 +1095,8 @@ def set_language():
     return jsonify({"ok":False,"msg":"Invalid language"})
 
 @app.route('/tts_status')
-def tts_status(): return jsonify(tts.status())
+def tts_status(): 
+    return jsonify(tts.status())
 
 @app.route('/motor/<direction>', methods=['POST'])
 def motor_control(direction):
@@ -918,7 +1110,8 @@ def motor_control(direction):
     return jsonify(res)
 
 @app.route('/battery')
-def battery_status(): return jsonify(motors.get_battery())
+def battery_status(): 
+    return jsonify(motors.get_battery())
 
 @app.route('/system_status')
 def system_status():
@@ -1011,327 +1204,12 @@ def audio_volume():
 @app.route('/audio/devices')
 def audio_devices():
     return jsonify({
-        "mic_detected": _parse_arecord_l(),
-        "spk_detected": _parse_aplay_l(),
+        "mic_detected": device_detector.audio_input,
+        "spk_detected": device_detector.audio_output,
         "MIC_PLUG": MIC_PLUG,
         "SPK_PLUG": SPK_PLUG,
         "override_hint": "export AV_MIC='plughw:CARD,DEV' AV_SPK='plughw:CARD,DEV' before starting the app to force"
     })
-
-# ============== Mumble Controller for Two-Way Audio ==============
-class MumbleController:
-    def __init__(self):
-        self.mumble_process = None
-        self.server_ip = None
-        self.username = "AvatarTank"
-        self.connected = False
-        self.muted = False
-        self.server_port = 64738
-        self.lock = threading.Lock()
-        
-    def connect(self, server_ip, username=None, port=64738):
-        """Connect to Mumble server"""
-        with self.lock:
-            if self.connected:
-                return {"ok": True, "msg": "Already connected"}
-            
-            self.server_ip = server_ip
-            self.server_port = port
-            if username:
-                self.username = username
-            
-            try:
-                # Start Mumble client in headless mode
-                cmd = [
-                    'mumble',
-                    '--server', server_ip,
-                    '--port', str(port),
-                    '--username', self.username,
-                    '--headless'  # Run without GUI
-                ]
-                
-                # Set environment variables for audio devices
-                env = os.environ.copy()
-                env['PULSE_RUNTIME_PATH'] = '/run/user/1000/pulse'
-                env['ALSA_CARD'] = MIC_PLUG.split(':')[1].split(',')[0] if ':' in MIC_PLUG else '0'
-                
-                self.mumble_process = subprocess.Popen(
-                    cmd, 
-                    env=env,
-                    stdout=subprocess.PIPE, 
-                    stderr=subprocess.PIPE
-                )
-                
-                # Give it time to connect
-                time.sleep(3)
-                
-                # Check if process is still running
-                if self.mumble_process.poll() is None:
-                    self.connected = True
-                    return {"ok": True, "msg": f"Connected to {server_ip}"}
-                else:
-                    stdout, stderr = self.mumble_process.communicate()
-                    return {"ok": False, "msg": f"Connection failed: {stderr.decode()}"}
-                
-            except Exception as e:
-                return {"ok": False, "msg": f"Failed to start Mumble: {e}"}
-    
-    def disconnect(self):
-        """Disconnect from Mumble server"""
-        with self.lock:
-            if self.mumble_process:
-                try:
-                    self.mumble_process.terminate()
-                    self.mumble_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.mumble_process.kill()
-                except:
-                    pass
-                self.mumble_process = None
-            
-            self.connected = False
-            return {"ok": True, "msg": "Disconnected"}
-    
-    def toggle_mute(self):
-        """Toggle mute status using system commands"""
-        if not self.connected:
-            return {"ok": False, "msg": "Not connected"}
-        
-        try:
-            # Use xdotool to send Ctrl+M to mumble (mute hotkey)
-            subprocess.run(['xdotool', 'search', '--name', 'mumble', 'key', 'ctrl+m'], 
-                         check=False, timeout=2)
-            self.muted = not self.muted
-            return {"ok": True, "muted": self.muted}
-        except Exception as e:
-            return {"ok": False, "msg": f"Mute toggle failed: {e}"}
-    
-    def get_status(self):
-        """Get current Mumble status"""
-        is_running = self.mumble_process and self.mumble_process.poll() is None
-        return {
-            "ok": True,
-            "connected": self.connected and is_running,
-            "server": self.server_ip,
-            "port": self.server_port,
-            "username": self.username,
-            "muted": self.muted,
-            "process_running": is_running
-        }
-
-# Initialize Mumble controller
-mumble = MumbleController()
-
-# ============== WebRTC Audio Streaming with aiortc ==============
-# WebRTC peer connections storage
-webrtc_peers = {}
-webrtc_lock = threading.Lock()
-
-if WEBRTC_AVAILABLE:
-    class AudioStreamTrack(MediaStreamTrack):
-        """
-        A custom audio track that captures from ALSA device
-        """
-        kind = "audio"
-        
-        def __init__(self, device=MIC_PLUG):
-            super().__init__()
-            # Use ffmpeg for audio capture but optimized for WebRTC
-            options = {
-                'format': 'alsa',
-                'audio_size': '480',  # 10ms frames for ultra-low latency
-                'sample_rate': '48000',  # WebRTC standard
-                'channels': '1'
-            }
-            self.player = MediaPlayer(f"alsa://{device}", format="alsa", options={"channels": "1", "sample_rate": "48000"})
-            self.audio_track = self.player.audio
-        
-        async def recv(self):
-            if self.audio_track:
-                frame = await self.audio_track.recv()
-                return frame
-            return None
-else:
-    # Dummy class when WebRTC is not available
-    class AudioStreamTrack:
-        def __init__(self, device=None):
-            pass
-
-# Conditional WebRTC routes - only available if aiortc is installed
-if WEBRTC_AVAILABLE:
-    @app.route('/webrtc/offer', methods=['POST'])
-    def webrtc_offer():
-        """
-        Handle WebRTC offer for audio streaming
-        """
-        try:
-            data = request.get_json()
-            offer = RTCSessionDescription(sdp=data['sdp'], type=data['type'])
-            
-            # Create new peer connection
-            pc = RTCPeerConnection()
-            peer_id = f"audio_{len(webrtc_peers)}"
-            
-            with webrtc_lock:
-                webrtc_peers[peer_id] = pc
-            
-            # Add audio track
-            audio_track = AudioStreamTrack()
-            pc.addTrack(audio_track)
-            
-            @pc.on("connectionstatechange")
-            async def on_connectionstatechange():
-                print(f"[WebRTC] Connection state: {pc.connectionState}")
-                if pc.connectionState == "closed":
-                    with webrtc_lock:
-                        webrtc_peers.pop(peer_id, None)
-            
-            # Handle offer in async context
-            async def handle_offer():
-                await pc.setRemoteDescription(offer)
-                answer = await pc.createAnswer()
-                await pc.setLocalDescription(answer)
-                return {
-                    'sdp': pc.localDescription.sdp,
-                    'type': pc.localDescription.type
-                }
-            
-            # Run in event loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            answer_data = loop.run_until_complete(handle_offer())
-            loop.close()
-            
-            return jsonify({
-                'ok': True,
-                'answer': answer_data,
-                'peer_id': peer_id
-            })
-            
-        except Exception as e:
-            print(f"[WebRTC] Offer error: {e}")
-            return jsonify({'ok': False, 'error': str(e)})
-
-    @app.route('/webrtc/close/<peer_id>', methods=['POST'])
-    def webrtc_close(peer_id):
-        """
-        Close WebRTC connection
-        """
-        try:
-            with webrtc_lock:
-                pc = webrtc_peers.pop(peer_id, None)
-            
-            if pc:
-                async def close_connection():
-                    await pc.close()
-                
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(close_connection())
-                loop.close()
-            
-            return jsonify({'ok': True, 'msg': 'Connection closed'})
-        except Exception as e:
-            return jsonify({'ok': False, 'error': str(e)})
-else:
-    # Dummy WebRTC routes when aiortc is not available
-    @app.route('/webrtc/offer', methods=['POST'])
-    def webrtc_offer():
-        return jsonify({'ok': False, 'error': 'WebRTC not available - aiortc not installed'})
-    
-    @app.route('/webrtc/close/<peer_id>', methods=['POST'])
-    def webrtc_close(peer_id):
-        return jsonify({'ok': False, 'error': 'WebRTC not available - aiortc not installed'})
-
-# Simple WebSocket fallback for browsers that don't support WebRTC properly
-websocket_active = False
-websocket_process = None
-@socketio.on('start_simple_audio')
-def handle_start_simple_audio():
-    global websocket_active, websocket_process
-    
-    if websocket_active:
-        emit('audio_status', {'status': 'already_active'})
-        return
-    
-    try:
-        websocket_active = True
-        
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-f", "alsa", "-i", MIC_PLUG,
-            "-acodec", "pcm_s16le", "-ar", "22050", "-ac", "1",
-            "-f", "s16le", "-"  # Raw PCM output
-        ]
-        
-        websocket_process = subprocess.Popen(cmd, stdout=PIPE, stderr=subprocess.DEVNULL, bufsize=1024)
-        
-        def audio_worker():
-            import base64
-            try:
-                while websocket_active and websocket_process:
-                    chunk = websocket_process.stdout.read(2048)
-                    if not chunk:
-                        break
-                    # Encode as base64 for JSON transport
-                    chunk_b64 = base64.b64encode(chunk).decode('ascii')
-                    socketio.emit('audio_data', {
-                        'data': chunk_b64,
-                        'format': 'pcm_s16le_22050_mono'
-                    })
-            except Exception as e:
-                print(f"[SimpleAudio] Error: {e}")
-            finally:
-                if websocket_process:
-                    try:
-                        websocket_process.terminate()
-                    except:
-                        pass
-        
-        thread = threading.Thread(target=audio_worker, daemon=True)
-        thread.start()
-        
-        emit('audio_status', {'status': 'started', 'format': 'pcm_s16le_22050_mono'})
-        print(f"[SimpleAudio] Started for client {request.sid}")
-        
-    except Exception as e:
-        websocket_active = False
-        emit('audio_status', {'status': 'error', 'message': str(e)})
-        print(f"[SimpleAudio] Error: {e}")
-
-@socketio.on('stop_simple_audio')
-def handle_stop_simple_audio():
-    global websocket_active, websocket_process
-    
-    try:
-        websocket_active = False
-        
-        if websocket_process:
-            try:
-                websocket_process.terminate()
-                websocket_process.wait(timeout=2)
-            except:
-                try:
-                    websocket_process.kill()
-                except:
-                    pass
-            websocket_process = None
-        
-        emit('audio_status', {'status': 'stopped'})
-        print(f"[SimpleAudio] Stopped for client {request.sid}")
-        
-    except Exception as e:
-        emit('audio_status', {'status': 'error', 'message': str(e)})
-        print(f"[SimpleAudio] Error: {e}")
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    global websocket_active
-    if websocket_active:
-        handle_stop_simple_audio()
-    print(f"[WebSocket] Client {request.sid} disconnected")
-
-
 
 @app.route('/audio_stream')
 def audio_stream():
@@ -1365,64 +1243,24 @@ def mic_test():
         return jsonify({"ok":False,"msg":p.stderr.strip() or "ffmpeg mic capture failed"})
     return send_file(out, as_attachment=True, download_name="mic_test.wav")
 
-# ---- recording endpoints (pipe from live frames) ----
 @app.route('/start_recording', methods=['POST'])
 def start_recording():
     d=request.get_json() or {}; abr=d.get("audio_bitrate","96k")
-    return jsonify(rec.start(a_bitrate=abr))
+    try:
+        result = rec.start(a_bitrate=abr)
+        return jsonify(result)
+    except Exception as e:
+        print(f"[Recorder] Start recording failed: {e}")
+        return jsonify({"ok": False, "msg": f"Recording failed: {str(e)}"}), 500
 
 @app.route('/stop_recording', methods=['POST'])
-def stop_recording(): return jsonify(rec.stop())
+def stop_recording(): 
+    return jsonify(rec.stop())
 
 @app.route('/recording_status')
-def recording_status(): return jsonify(rec.status())
+def recording_status(): 
+    return jsonify(rec.status())
 
-# ---- Mumble routes for two-way audio ----
-@app.route('/mumble/connect', methods=['POST'])
-def mumble_connect():
-    """Connect to Mumble server"""
-    try:
-        data = request.get_json() or {}
-        server_ip = data.get('server_ip')
-        username = data.get('username', 'AvatarTank')
-        port = data.get('port', 64738)
-        
-        if not server_ip:
-            return jsonify({"ok": False, "msg": "Server IP is required"})
-        
-        result = mumble.connect(server_ip, username, port)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"ok": False, "msg": f"Connection error: {str(e)}"})
-
-@app.route('/mumble/disconnect', methods=['POST'])
-def mumble_disconnect():
-    """Disconnect from Mumble server"""
-    try:
-        result = mumble.disconnect()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"ok": False, "msg": f"Disconnection error: {str(e)}"})
-
-@app.route('/mumble/toggle_mute', methods=['POST'])
-def mumble_toggle_mute():
-    """Toggle Mumble mute status"""
-    try:
-        result = mumble.toggle_mute()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"ok": False, "msg": f"Mute toggle error: {str(e)}"})
-
-@app.route('/mumble/status')
-def mumble_status():
-    """Get Mumble connection status"""
-    try:
-        status = mumble.get_status()
-        return jsonify(status)
-    except Exception as e:
-        return jsonify({"ok": False, "msg": f"Status error: {str(e)}"})
-
-# ---- prediction endpoints ----
 @app.route("/predict")
 def predict_endpoint():
     q = request.args.get("q", "", type=str)[:200]
@@ -1460,7 +1298,6 @@ def predict_learned():
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)})
 
-# ---- system control ----
 @app.route('/system/reboot', methods=['POST'])
 def system_reboot():
     try:
@@ -1482,7 +1319,7 @@ def index():
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Avatar Tank - Freedom Interface</title>
+  <title>Avatar Tank - Clean Interface</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
   <style>
@@ -1589,29 +1426,6 @@ def index():
     .info-label{
       color:#808080;font-weight:bold;
     }
-    .video-overlay{
-      position:absolute;top:15px;left:15px;right:15px;
-      display:flex;justify-content:space-between;align-items:flex-start;
-      pointer-events:none;z-index:10;
-    }
-    .bandwidth-indicator{
-      background:rgba(0,0,0,0.85);border:1px solid #ff8c00;
-      border-radius:8px;padding:6px 10px;font-size:11px;
-      display:flex;align-items:center;gap:6px;
-      box-shadow:0 2px 8px rgba(0,0,0,.5);
-    }
-    .bandwidth-bar{
-      width:50px;height:6px;background:#333;border-radius:3px;overflow:hidden;
-    }
-    .bandwidth-fill{
-      height:100%;background:linear-gradient(90deg,#ff4444,#ffaa00,#44ff44);
-      transition:width .5s;border-radius:3px;
-    }
-    .datetime-display{
-      background:rgba(0,0,0,0.85);border:1px solid #808080;
-      border-radius:8px;padding:6px 10px;font-size:11px;text-align:right;
-      box-shadow:0 2px 8px rgba(0,0,0,.5);
-    }
     .motor{
       grid-area:motor;
       background:linear-gradient(145deg,rgba(20,40,20,0.95),rgba(30,60,30,0.95));
@@ -1664,7 +1478,7 @@ def index():
       background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.2) 50%,transparent 100%);
       animation:sweep 2s infinite;
     }
-    @keyframes sweep{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}}
+    @keyframes sweep{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
     .sound{
       grid-area:sound;
       background:linear-gradient(145deg,rgba(40,30,20,0.95),rgba(60,45,30,0.95));
@@ -1733,11 +1547,11 @@ def index():
   <div class="panel motor">
     <h3>🎮 Motor <span id="mled" class="led warn"></span></h3>
     <div class="grid">
-      <div></div> <button class="mbtn" onmousedown="go('forward')" onmouseup="stopM()" onmouseleave="stopM()">▲</button> <div></div>
-      <button class="mbtn" onmousedown="go('left')" onmouseup="stopM()" onmouseleave="stopM()">◀</button>
+      <div></div> <button class="mbtn" onmousedown="go('forward')" onmouseup="stopM()">▲</button> <div></div>
+      <button class="mbtn" onmousedown="go('left')" onmouseup="stopM()">◀</button>
       <button class="mbtn stop" onclick="estop()">⬛</button>
-      <button class="mbtn" onmousedown="go('right')" onmouseup="stopM()" onmouseleave="stopM()">▶</button>
-      <div></div> <button class="mbtn" onmousedown="go('backward')" onmouseup="stopM()" onmouseleave="stopM()">▼</button> <div></div>
+      <button class="mbtn" onmousedown="go('right')" onmouseup="stopM()">▶</button>
+      <div></div> <button class="mbtn" onmousedown="go('backward')" onmouseup="stopM()">▼</button> <div></div>
     </div>
     <div class="row">
       <span>Speed:</span>
@@ -1812,29 +1626,9 @@ def index():
       </div>
       <div class="row" style="margin-top:8px">
         <span id="mic-status" style="font-size:10px;color:#808080;flex:1">Ready</span>
-        <span id="audio-quality" style="font-size:10px;color:#44ff44">WebRTC Ready</span>
+        <span id="audio-quality" style="font-size:10px;color:#44ff44">WebSocket Audio</span>
       </div>
       <audio id="audio-playback" autoplay style="display:none"></audio>
-    </div>
-
-    <!-- Mumble Controls -->
-    <div class="group">
-      <h4>📡 Mumble</h4>
-      <div class="row">
-        <input id="mumble_server" type="text" placeholder="Server IP" style="flex:1;margin-right:5px;background:rgba(20,20,20,0.8);border:1px solid #ff8c00;color:#cccccc;padding:6px;border-radius:5px;font-size:12px">
-        <input id="mumble_port" type="text" placeholder="Port" value="64738" style="width:60px;background:rgba(20,20,20,0.8);border:1px solid #ff8c00;color:#cccccc;padding:6px;border-radius:5px;font-size:12px">
-      </div>
-      <div class="row" style="margin-top:5px">
-        <input id="mumble_username" type="text" placeholder="Username" value="AvatarTank" style="flex:1;margin-right:5px;background:rgba(20,20,20,0.8);border:1px solid #ff8c00;color:#cccccc;padding:6px;border-radius:5px;font-size:12px">
-        <button id="mumble_connect_btn" class="btn" onclick="connectMumble()" style="width:80px">Connect</button>
-      </div>
-      <div class="row" style="margin-top:5px">
-        <button id="mumble_disconnect_btn" class="btn" onclick="disconnectMumble()" style="flex:1;margin-right:5px">Disconnect</button>
-        <button id="mumble_mute_btn" class="btn" onclick="toggleMumbleMute()" style="width:80px">🔊</button>
-      </div>
-      <div class="row" style="margin-top:5px;font-size:12px">
-        <span>Status: <span id="mumble_status">Disconnected</span></span>
-      </div>
     </div>
 
     <div class="group">
@@ -1858,7 +1652,7 @@ def index():
     </div>
   </div>
 
-  <div id="log" class="panel log">Avatar Tank Interface ready</div>
+  <div id="log" class="panel log">Avatar Tank Clean Interface ready</div>
 </div>
 
 <script>
@@ -1886,6 +1680,7 @@ let lastFrameTime = Date.now();
 let currentFPS = 0;
 let bandwidthSamples = [];
 let vuMeterActive = false;
+let recordingActive = false;  // Flag to indicate when recording is in progress
 let totalDataUsed = 0; // Cumulative data usage in KB
 let lastBandwidthUpdate = Date.now();
 
@@ -1930,7 +1725,7 @@ function updateBandwidth() {
         
         const fpsEl = sid('fps');
         if (fpsEl) {
-          fpsEl.textContent = `FPS: ${currentFPS.toFixed(1)}`;
+          fpsEl.textContent = currentFPS.toFixed(1);
         }
         
         // Simulate bandwidth based on FPS and resolution
@@ -2028,36 +1823,57 @@ function updateBandwidthDisplay(bandwidth) {
 function enhancedVUMeter() {
   try {
     const vuBar = sid('vu');
-    if (!vuBar) return; // Exit if VU bar not found
+    if (!vuBar) return;
     
-    // Directly get element without logging warning - 'mica' element may not exist
-    const micAudio = document.getElementById('mica');
-    // Only proceed with audio-based VU meter if micAudio element exists
-    if (vuMeterActive && micAudio && !micAudio.paused) {
-      // Create a more realistic VU meter simulation
-      const baseLevel = 20 + Math.random() * 30;
-      const spike = Math.random() > 0.8 ? Math.random() * 40 : 0;
-      const level = Math.min(100, baseLevel + spike);
+    // Use the actual RMS value from the WebSocket audio stream
+    if (vuMeterActive && window.lastAudioRMS !== undefined) {
+      // Get the RMS value (0-1 range)
+      let rms = Math.max(0, Math.min(1, window.lastAudioRMS || 0));
+      
+      // Apply a more sophisticated scaling for better visualization
+      // This uses a piecewise function for better low-level visibility
+      let scaledLevel;
+      if (rms < 0.01) {
+        // Very low signal - use linear scaling
+        scaledLevel = rms * 1000;  // Boost very low signals
+      } else if (rms < 0.1) {
+        // Low signal - use square root scaling
+        scaledLevel = Math.sqrt(rms * 10) * 30;
+      } else {
+        // Medium to high signal - use logarithmic scaling
+        scaledLevel = Math.log10(rms * 99 + 1) * 50;
+      }
+      
+      // Clamp and convert to percentage
+      const level = Math.max(0, Math.min(100, Math.round(scaledLevel)));
       
       vuBar.style.width = `${level}%`;
       
       // Add color coding based on level
-      if (level > 80) {
-        vuBar.style.boxShadow = '0 0 15px #ff0000';
-      } else if (level > 60) {
+      if (level > 85) {
+        vuBar.style.boxShadow = '0 0 20px #ff0000';
+        vuBar.style.background = 'linear-gradient(90deg, #44ff44, #ffff00, #ff0000)';
+      } else if (level > 70) {
+        vuBar.style.boxShadow = '0 0 15px #ff8800';
+        vuBar.style.background = 'linear-gradient(90deg, #44ff44, #ffff00, #ff8800)';
+      } else if (level > 50) {
         vuBar.style.boxShadow = '0 0 10px #ffff00';
+        vuBar.style.background = 'linear-gradient(90deg, #44ff44, #ffff00)';
       } else {
         vuBar.style.boxShadow = '0 0 5px #00ff00';
+        vuBar.style.background = 'linear-gradient(90deg, #44ff44)';
       }
     } else {
       // Show inactive VU meter
       vuBar.style.width = '0%';
       vuBar.style.boxShadow = 'none';
+      vuBar.style.background = 'linear-gradient(90deg, #44ff44)';
     }
-  } catch (e) {
-    // Silently handle errors to prevent console spam
+  } catch(e) {
+    // Silently handle errors
   }
 }
+
 function clearText() {
   try {
     const input = document.getElementById('tts');
@@ -2098,6 +1914,7 @@ function pick(t) {
     if (predictions) predictions.style.display = 'none';
   }
 }
+
 function updateRecentPhrases(phrase) {
   if (!phrase || phrase.length < 3) return;
   recentPhrases = recentPhrases.filter(p => p !== phrase);
@@ -2172,6 +1989,7 @@ function handleTTSKeydown(event) {
     if (predictions) predictions.style.display = 'none';
   }
 }
+
 async function speak() {
   try {
     const textEl = document.getElementById('tts');
@@ -2396,15 +2214,45 @@ async function statusAll() {
 async function recStart() { 
   try {
     log('Recording start...'); 
+    
+    // Store current audio state
+    const wasAudioActive = audioActive;
+    
+    // Stop audio streaming temporarily to free up the audio device
+    if (audioActive) {
+      await toggleMicrophone(); // This will stop the audio
+      log('Audio stream paused for recording');
+      // Add a small delay to ensure the device is fully released
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    // Signal that recording is active
+    recordingActive = true;
+    
     const r = await fetch('/start_recording', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({audio_bitrate: '96k'})
     }); 
     const j = await r.json(); 
-    log(j.ok ? ('Recording -> ' + j.file) : ('Rec error: ' + j.msg)); 
+    if (j.ok) {
+      let msg = 'Recording -> ' + j.file;
+      if (j.audio === false) {
+        msg += ' (video only - audio device busy)';
+      }
+      log(msg);
+    } else {
+      // Check if it's an audio device conflict
+      if (j.msg && (j.msg.includes('Device or resource busy') || j.msg.includes('Resource temporarily unavailable'))) {
+        log('Rec error: Audio device busy - try stopping audio stream first');
+      } else {
+        log('Rec error: ' + j.msg); 
+      }
+    }
   } catch (e) {
     log('Recording start error: ' + e.message);
+    // Reset recording flag on error
+    recordingActive = false;
   }
 }
 
@@ -2413,6 +2261,18 @@ async function recStop() {
     log('Recording stop...'); 
     const r = await fetch('/stop_recording', {method: 'POST'}); 
     const j = await r.json(); 
+    
+    // Signal that recording is no longer active
+    recordingActive = false;
+    
+    // Restart audio streaming if it was active before
+    if (!audioActive) { // audioActive is now false after recording
+      // Add a small delay to ensure the recording process has fully released the device
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await toggleMicrophone(); // This will start the audio
+      log('Audio stream resumed');
+    }
+    
     log(j.ok ? ('Stopped. Last -> ' + (j.file || 'n/a')) : ('Stop error: ' + j.msg)); 
   } catch (e) {
     log('Recording stop error: ' + e.message);
@@ -2421,17 +2281,14 @@ async function recStop() {
 
 // Enhanced audio streaming variables
 let audioActive = false;
-let webrtcPeer = null;
-let webrtcPeerId = null;
 let audioContext = null;
-let audioWorklet = null;
-let socket = null; // Global socket variable declared ONCE
+let socket = null; // Global socket variable
 
 function initWebSocket() {
   try {
     if (socket && socket.connected) return socket;
     
-    console.log('Initializing complete Socket.IO connection...');
+    console.log('Initializing Socket.IO connection...');
     
     socket = io({
       timeout: 10000,
@@ -2465,14 +2322,11 @@ function initWebSocket() {
         audioActive = false;
         updateMicButton();
       } else if (data.status === 'started') {
-        updateMicStatus('Audio streaming active (WebSocket fallback)');
+        updateMicStatus('Audio streaming active');
       }
     });
     
     socket.on('audio_data', function(data) {
-      console.log('Received audio_data:', data.byteLength || data.length || 'unknown size', 'bytes');
-      console.log('Audio data type:', typeof data, 'Constructor:', data.constructor.name);
-      
       if (audioActive && audioContext) {
         try {
           playAudioChunk(data);
@@ -2482,134 +2336,29 @@ function initWebSocket() {
       }
     });
     
-    socket.on('test_event', function(data) {
-      console.log('✅ Socket.IO test event received:', data);
-    });
-    
-    socket.on('test_binary', function(data) {
-      console.log('✅ Binary test received:', typeof data, data.constructor.name, 'Length:', data.byteLength || data.length);
-    });
-    
     return socket;
-  } catch (e) {
-    console.error('WebSocket init error:', e);
-    updateMicStatus('WebSocket init failed: ' + e.message);
-    return null;
-  }
-}
-
-async function initWebRTC() {
-  try {
-    // Check if WebRTC is supported in browser
-    if (!window.RTCPeerConnection) {
-      throw new Error('WebRTC not supported in browser');
-    }
-    
-    // Check if getUserMedia is available for microphone access
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error('getUserMedia not available');
-    }
-    
-    updateMicStatus('Setting up WebRTC...');
-    
-    // Get microphone stream from browser (not server ALSA!)
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        sampleRate: 16000,
-        channelCount: 1,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false
-      }
-    });
-    
-    // Create peer connection
-    webrtcPeer = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-    });
-    
-    // Add microphone stream to peer connection
-    stream.getTracks().forEach(track => {
-      webrtcPeer.addTrack(track, stream);
-    });
-    
-    // Handle connection state changes
-    webrtcPeer.onconnectionstatechange = function() {
-      console.log('WebRTC connection state:', webrtcPeer.connectionState);
-      updateMicStatus('WebRTC: ' + webrtcPeer.connectionState);
-      
-      if (webrtcPeer.connectionState === 'connected') {
-        updateMicStatus('WebRTC connected');
-      } else if (webrtcPeer.connectionState === 'disconnected' || 
-                 webrtcPeer.connectionState === 'failed') {
-        updateMicStatus('WebRTC: ' + webrtcPeer.connectionState);
-        // Don't auto-fallback here, let toggleMicrophone handle it
-      }
-    };
-    
-    webrtcPeer.oniceconnectionstatechange = function() {
-      console.log('ICE connection state:', webrtcPeer.iceConnectionState);
-    };
-    
-    webrtcPeer.onicegatheringstatechange = function() {
-      console.log('ICE gathering state:', webrtcPeer.iceGatheringState);
-    };
-    
-    // Create offer
-    const offer = await webrtcPeer.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
-    await webrtcPeer.setLocalDescription(offer);
-    
-    // Send offer to server
-    const response = await fetch('/webrtc/offer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sdp: offer.sdp,
-        type: offer.type
-      })
-    });
-    
-    const result = await response.json();
-    if (result.ok) {
-      webrtcPeerId = result.peer_id;
-      const answer = new RTCSessionDescription(result.answer);
-      await webrtcPeer.setRemoteDescription(answer);
-      updateMicStatus('WebRTC connected');
-      return true;
-    } else {
-      throw new Error(result.error || 'WebRTC setup failed');
-    }
     
   } catch (e) {
-    console.log('WebRTC init error:', e);
-    updateMicStatus('WebRTC failed: ' + e.message);
+    console.log('WebSocket init error:', e);
+    updateMicStatus('WebSocket failed: ' + e.message);
     return false;
   }
 }
 
-async function startWebSocketAudio() {
-  try {
-    if (!socket) {
-      socket = initWebSocket();
-      if (!socket) throw new Error('WebSocket init failed');
-    }
-    
-    // Initialize audio context for playback
-    if (!audioContext) {
-      audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    
-    socket.emit('start_simple_audio');
-    updateMicStatus('Starting WebSocket audio...');
-    return true;
-  } catch (e) {
-    console.error('WebSocket audio error:', e);
-    updateMicStatus('WebSocket audio failed: ' + e.message);
-    return false;
-  }
+// Initialize audio buffering system
+if (!window.audioBufferSystem) {
+  window.audioBufferSystem = {
+    bufferQueue: [],
+    isPlaying: false,
+    nextStartTime: 0,
+    sampleRate: 22050,
+    chunkDuration: 0.093, // ~2048 samples at 22050 Hz
+    maxQueueSize: 3, // Maximum buffered chunks for low latency
+    targetQueueSize: 2, // Ideal queue size
+    lastCleanup: 0
+  };
 }
 
-// FIXED Audio streaming functions
 function initWebAudio() {
   try {
     if (audioContext) return true;
@@ -2628,27 +2377,18 @@ function initWebAudio() {
   }
 }
 
-// Initialize audio buffering system with adaptive queue management
-if (!window.audioBufferSystem) {
-  window.audioBufferSystem = {
-    bufferQueue: [],
-    isPlaying: false,
-    nextStartTime: 0,
-    sampleRate: 22050,
-    chunkDuration: 0.093, // ~2048 samples at 22050 Hz
-    maxQueueSize: 3, // Maximum buffered chunks for low latency
-    targetQueueSize: 2, // Ideal queue size
-    lastCleanup: 0
-  };
-}
-
 // Enhanced playAudioChunk function with proper buffering
 function playAudioChunk(audioData) {
   let chunkNumber = (window.audioChunkCounter || 0) + 1;
   window.audioChunkCounter = chunkNumber;
   
+  // Reduce audio processing when recording is active to minimize conflicts
+  if (recordingActive && chunkNumber % 3 !== 0) {
+    // Skip 2 out of 3 audio chunks when recording to reduce audio device load
+    return;
+  }
+  
   if (!audioActive || !audioContext) {
-    console.log('Audio not active or context missing', {audioActive, audioContextState: audioContext?.state});
     return;
   }
   
@@ -2657,10 +2397,6 @@ function playAudioChunk(audioData) {
     
     // Handle server format: {data: 'base64string', format: 'pcm_s16le_22050_mono'}
     if (audioData && typeof audioData === 'object' && audioData.data && typeof audioData.data === 'string') {
-      if (chunkNumber === 1 || chunkNumber % 50 === 0) {
-        console.log(`Decoding base64 audio data: ${audioData.data.length} chars, format: ${audioData.format}`);
-      }
-      
       // Decode base64 to binary string
       const binaryString = atob(audioData.data);
       
@@ -2701,7 +2437,7 @@ function playAudioChunk(audioData) {
     const floatSamples = new Float32Array(samples.length);
     
     // Apply gain boost and convert to float
-    const gain = 2.0; // Reduced gain to prevent distortion
+    const gain = 2.0;
     let sumSquares = 0;
     for (let i = 0; i < samples.length; i++) {
       const sample = (samples[i] / 32768.0) * gain;
@@ -2711,6 +2447,12 @@ function playAudioChunk(audioData) {
     
     // Calculate RMS for VU meter
     const rms = Math.sqrt(sumSquares / samples.length);
+    window.lastAudioRMS = rms;
+    
+    // Debug logging for VU meter
+    if (chunkNumber % 50 === 0) {  // Log every 50 chunks
+        console.log(`Audio RMS: ${rms.toFixed(6)} (${(rms * 100).toFixed(2)}%)`);
+    }
     
     // Add to buffer queue with adaptive queue management
     const bufferSystem = window.audioBufferSystem;
@@ -2720,7 +2462,7 @@ function playAudioChunk(audioData) {
       const droppedChunks = bufferSystem.bufferQueue.length - bufferSystem.targetQueueSize + 1;
       bufferSystem.bufferQueue.splice(0, droppedChunks);
       if (chunkNumber % 25 === 0) {
-        console.log(`🚨 Dropped ${droppedChunks} old audio chunks to prevent delay buildup`);
+        console.log(`Dropped ${droppedChunks} old audio chunks to prevent delay buildup`);
       }
     }
     
@@ -2734,25 +2476,6 @@ function playAudioChunk(audioData) {
     // Start playback if not already playing
     if (!bufferSystem.isPlaying) {
       startBufferedPlayback();
-    }
-    
-    // Update VU meter
-    if (typeof updateVUMeter === 'function') {
-      updateVUMeter(rms * 100); // Convert to percentage
-    }
-    
-    // Debug logging with queue health monitoring
-    if (chunkNumber % 25 === 0) {
-      let rmsLabel = 'SILENT';
-      if (rms > 0.01) rmsLabel = 'GOOD AUDIO';
-      else if (rms > 0.005) rmsLabel = 'Weak';
-      else if (rms > 0.001) rmsLabel = 'Very Weak';
-      
-      const queueSize = bufferSystem.bufferQueue.length;
-      const queueStatus = queueSize <= bufferSystem.targetQueueSize ? '✅' : 
-                         queueSize <= bufferSystem.maxQueueSize ? '⚠️' : '🚨';
-      
-      console.log(`Audio chunk ${chunkNumber}: ${arrayBuffer.byteLength} bytes → ${samples.length} samples, RMS: ${rms.toFixed(4)} (${rmsLabel}), Queue: ${queueSize} ${queueStatus}`);
     }
     
   } catch (e) {
@@ -2772,7 +2495,7 @@ function startBufferedPlayback() {
   if (!window.audioGainNode) {
     window.audioGainNode = audioContext.createGain();
     window.audioGainNode.connect(audioContext.destination);
-    window.audioGainNode.gain.value = 2.0; // Reduced gain
+    window.audioGainNode.gain.value = 2.0;
     console.log('Created audioGainNode with 2x volume boost');
   }
   
@@ -2840,28 +2563,15 @@ function scheduleNextBuffer() {
   }
 }
 
-
-
 async function toggleMicrophone() {
   try {
     if (audioActive) {
-      // Stop audio streaming
       audioActive = false;
-      
-      if (webrtcPeer && webrtcPeerId) {
-        await fetch(`/webrtc/close/${webrtcPeerId}`, { method: 'POST' });
-        webrtcPeer.close();
-        webrtcPeer = null;
-        webrtcPeerId = null;
-      }
-      
+      vuMeterActive = false;
       if (socket) {
         socket.emit('stop_simple_audio');
       }
-      
       updateMicStatus('Audio stopped');
-      vuMeterActive = false;
-      
     } else {
       // Start audio streaming
       updateMicStatus('Starting audio...');
@@ -2871,46 +2581,18 @@ async function toggleMicrophone() {
         initWebAudio();
       }
       
-      let success = false;
-      
-      // Try WebRTC first (browser microphone to server)
-      updateMicStatus('Setting up WebRTC...');
-      try {
-        success = await initWebRTC();
-        if (success) {
-          updateMicStatus('WebRTC connected');
-        }
-      } catch (e) {
-        console.log('WebRTC failed:', e.message);
-        updateMicStatus('WebRTC failed: ' + e.message);
+      // Initialize WebSocket connection
+      if (!socket) {
+        initWebSocket();
       }
       
-      // Fallback to WebSocket if WebRTC fails (server microphone to browser)
-      if (!success) {
-        updateMicStatus('WebRTC failed - will fallback to WebSocket');
-        console.log('Auto-fallback to WebSocket audio...');
-        try {
-          if (!socket) {
-            socket = initWebSocket();
-          }
-          if (socket) {
-            console.log('Emitting start_simple_audio to server...');
-            socket.emit('start_simple_audio');
-            updateMicStatus('Starting WebSocket audio...');
-            success = true;
-          }
-        } catch (e) {
-          console.error('WebSocket audio setup failed:', e);
-          updateMicStatus('WebSocket setup failed: ' + e.message);
-        }
-      }
-      
-      if (success) {
+      if (socket) {
+        socket.emit('start_simple_audio');
         audioActive = true;
         vuMeterActive = true;
         updateMicStatus('Audio streaming active');
       } else {
-        updateMicStatus('Failed to start audio');
+        updateMicStatus('Failed to start audio - no WebSocket');
       }
     }
     
@@ -2947,23 +2629,6 @@ function updateMicStatus(status) {
   console.log('Mic status:', status);
 }
 
-function updateAudioQuality(quality) {
-  const qualityEl = document.getElementById('audio-quality');
-  if (qualityEl) {
-    qualityEl.textContent = quality;
-    // Color coding based on quality
-    if (quality.includes('WebRTC')) {
-      qualityEl.style.color = '#44ff44';  // Green for WebRTC
-    } else if (quality.includes('WebSocket')) {
-      qualityEl.style.color = '#ffaa00';  // Orange for WebSocket
-    } else if (quality.includes('Error') || quality.includes('Failed')) {
-      qualityEl.style.color = '#ff4444';  // Red for errors
-    } else {
-      qualityEl.style.color = '#808080';  // Gray for ready/unknown
-    }
-  }
-}
-
 async function testMic() {
   try {
     log('Testing microphone...');
@@ -2989,9 +2654,6 @@ async function testMic() {
 }
 
 let muted = false;
-let socketConnected = false;
-
-
 
 async function setVol(v) { 
   try {
@@ -3116,134 +2778,9 @@ document.addEventListener('keyup', function(e) {
   }
 });
 
-// ---- Mumble Functions ----
-async function connectMumble() {
-  try {
-    const serverEl = document.getElementById('mumble_server');
-    const portEl = document.getElementById('mumble_port');
-    const usernameEl = document.getElementById('mumble_username');
-    
-    if (!serverEl || !serverEl.value) {
-      log('Please enter a Mumble server IP');
-      return;
-    }
-    
-    const server = serverEl.value;
-    const port = portEl ? parseInt(portEl.value) || 64738 : 64738;
-    const username = usernameEl ? usernameEl.value || 'AvatarTank' : 'AvatarTank';
-    
-    log('Connecting to Mumble server...');
-    
-    const response = await fetch('/mumble/connect', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        server_ip: server,
-        port: port,
-        username: username
-      })
-    });
-    
-    const result = await response.json();
-    
-    if (result.ok) {
-      log('Mumble connected successfully');
-      updateMumbleStatus();
-    } else {
-      log('Mumble connection failed: ' + result.msg);
-    }
-  } catch (e) {
-    log('Mumble connection error: ' + e.message);
-  }
-}
-
-async function disconnectMumble() {
-  try {
-    log('Disconnecting from Mumble...');
-    
-    const response = await fetch('/mumble/disconnect', {
-      method: 'POST'
-    });
-    
-    const result = await response.json();
-    
-    if (result.ok) {
-      log('Mumble disconnected');
-      updateMumbleStatus();
-    } else {
-      log('Mumble disconnection failed: ' + result.msg);
-    }
-  } catch (e) {
-    log('Mumble disconnection error: ' + e.message);
-  }
-}
-
-async function toggleMumbleMute() {
-  try {
-    const response = await fetch('/mumble/toggle_mute', {
-      method: 'POST'
-    });
-    
-    const result = await response.json();
-    
-    if (result.ok) {
-      const btn = document.getElementById('mumble_mute_btn');
-      if (btn) {
-        btn.textContent = result.muted ? '🔇' : '🔊';
-        btn.style.background = result.muted ? '#f00' : '';
-      }
-      log(result.muted ? 'Mumble muted' : 'Mumble unmuted');
-      updateMumbleStatus();
-    } else {
-      log('Mumble mute toggle failed: ' + result.msg);
-    }
-  } catch (e) {
-    log('Mumble mute toggle error: ' + e.message);
-  }
-}
-
-async function updateMumbleStatus() {
-  try {
-    const response = await fetch('/mumble/status');
-    const status = await response.json();
-    
-    const statusEl = document.getElementById('mumble_status');
-    if (statusEl) {
-      if (status.connected && status.process_running) {
-        statusEl.textContent = 'Connected';
-        statusEl.style.color = '#44ff44';
-      } else if (status.process_running) {
-        statusEl.textContent = 'Connecting...';
-        statusEl.style.color = '#ffaa00';
-      } else {
-        statusEl.textContent = 'Disconnected';
-        statusEl.style.color = '#ff4444';
-      }
-    }
-    
-    // Update button states
-    const connectBtn = document.getElementById('mumble_connect_btn');
-    const disconnectBtn = document.getElementById('mumble_disconnect_btn');
-    const muteBtn = document.getElementById('mumble_mute_btn');
-    
-    if (connectBtn) connectBtn.disabled = status.connected;
-    if (disconnectBtn) disconnectBtn.disabled = !status.connected;
-    if (muteBtn) {
-      muteBtn.disabled = !status.connected;
-      muteBtn.textContent = status.muted ? '🔇' : '🔊';
-      muteBtn.style.background = status.muted ? '#f00' : '';
-    }
-  } catch (e) {
-    console.error('Mumble status update error:', e);
-  }
-}
-
-// Update Mumble status periodically
-setInterval(updateMumbleStatus, 5000);
-
 function init() {
   try {
-    log('Initializing Avatar Tank Enhanced System...');
+    log('Initializing Avatar Tank Clean System...');
     
     // Initialize Socket.IO connection first
     initWebSocket();
@@ -3260,10 +2797,6 @@ function init() {
     
     setInterval(updateBandwidth, 100); // More frequent bandwidth updates
     setInterval(enhancedVUMeter, 50); // Smooth VU meter updates
-    
-    // Initialize Mumble status
-    updateMumbleStatus();
-    setInterval(updateMumbleStatus, 5000);
     
     // Video stream monitoring
     setInterval(function() { 
@@ -3324,14 +2857,13 @@ console.log('JavaScript loaded successfully');
 </body>
 </html>"""
 
-# --- keep server alive ---
+# --- Server startup ---
 if __name__ == '__main__':
     try:
-        print("Avatar Tank - Backend ready")
+        print("Avatar Tank - Clean Backend ready")
         print("Speaker:", SPK_PLUG)
         print("Mic    :", MIC_PLUG)
         print("TTS    :", tts.status())
-        print("WebRTC :", "Available" if WEBRTC_AVAILABLE else "Not available")
         print("Camera :", "Working" if camera and not isinstance(camera, DummyCamera) else "Dummy/Failed")
     except Exception as e:
         print(f"Startup info error: {e}")
@@ -3343,7 +2875,7 @@ if __name__ == '__main__':
         import simple_websocket
         print("✓ simple-websocket available")
         
-        # Start with explicit configuration (removed problematic logger config)
+        # Start with explicit configuration
         socketio.run(
             app, 
             host='0.0.0.0', 
