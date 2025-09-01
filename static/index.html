@@ -1,0 +1,1484 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Avatar Tank - Control Interface</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap');
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: 'Orbitron', 'Courier New', monospace;
+      background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 50%, #1a1a1a 100%);
+      color: #cccccc;
+      min-height: 100vh;
+      overflow-x: auto;
+      background-attachment: fixed;
+    }
+    
+    .container {
+      display: grid;
+      grid-template-areas:
+        "tts tts tts"
+        "motor video audio"
+        "sound video audio"
+        "log log log";
+      grid-template-columns: 280px 1fr 340px;
+      grid-template-rows: 80px 1fr auto 70px;
+      gap: 15px;
+      padding: 15px;
+      min-height: 100vh;
+    }
+    
+    .panel {
+      background: rgba(45, 45, 45, 0.95);
+      border: 2px solid #ff8c00;
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 0 20px rgba(255, 140, 0, 0.2);
+      backdrop-filter: blur(3px);
+    }
+    
+    .tts {
+      grid-area: tts;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: rgba(20, 20, 50, 0.95);
+    }
+    
+    .tts input {
+      flex: 1;
+      background: rgba(20, 20, 20, 0.8);
+      border: 2px solid #ff8c00;
+      color: #cccccc;
+      padding: 12px;
+      border-radius: 10px;
+      font: inherit;
+      transition: box-shadow 0.3s;
+    }
+    
+    .tts input:focus {
+      box-shadow: 0 0 10px rgba(255, 140, 0, 0.5);
+      outline: none;
+    }
+    
+    .pills {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    
+    .pill {
+      background: linear-gradient(145deg, #555, #666);
+      border: 1px solid #ff8c00;
+      color: #cccccc;
+      padding: 6px 12px;
+      border-radius: 18px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: all 0.2s;
+    }
+    
+    .pill:hover {
+      background: #ff8c00;
+      color: #000;
+      transform: translateY(-1px);
+    }
+    
+    .diacritic-pill {
+      background: #444;
+      color: #ff8c00;
+      font-weight: bold;
+      font-size: 16px;
+      min-width: 32px;
+      text-align: center;
+    }
+    
+    .btn {
+      background: linear-gradient(145deg, #4a4a4a, #2a2a2a);
+      border: 2px solid #ff8c00;
+      color: #cccccc;
+      padding: 10px 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      font: inherit;
+      transition: all 0.3s;
+    }
+    
+    .btn:hover {
+      background: #ff8c00;
+      color: #000;
+      box-shadow: 0 0 15px #ff8c00;
+      transform: translateY(-2px);
+    }
+    
+    .btn-orange {
+      border-color: #ff6600;
+      color: #ff6600;
+      font-weight: bold;
+    }
+    
+    .btn-orange:hover {
+      background: #ff6600;
+      color: #000;
+    }
+    
+    .lang {
+      display: flex;
+      border: 2px solid #ff8c00;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    
+    .lang button {
+      background: #555;
+      border: none;
+      color: #cccccc;
+      padding: 10px 14px;
+      cursor: pointer;
+      flex: 1;
+      transition: all 0.2s;
+    }
+    
+    .lang .active {
+      background: #ff8c00;
+      color: #000;
+      font-weight: bold;
+    }
+    
+    .video {
+      grid-area: video;
+      text-align: center;
+      background: rgba(30, 30, 30, 0.95);
+    }
+    
+    .video img {
+      width: 100%;
+      max-width: 920px;
+      border-radius: 12px;
+      border: 3px solid #ff8c00;
+    }
+    
+    .video-info-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.8);
+      border: 1px solid #ff8c00;
+      border-radius: 8px;
+      padding: 8px 12px;
+      margin: 10px auto 0 auto;
+      font-size: 11px;
+      flex-wrap: wrap;
+      gap: 15px;
+      max-width: 920px;
+      width: 100%;
+    }
+    
+    .info-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-width: fit-content;
+    }
+    
+    .info-label {
+      color: #808080;
+      font-weight: bold;
+    }
+    
+    .motor {
+      grid-area: motor;
+      background: rgba(20, 40, 20, 0.95);
+    }
+    
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+      margin: 15px 0;
+    }
+    
+    .mbtn {
+      background: linear-gradient(145deg, #2a2a2a, #1a1a1a);
+      border: 3px solid #00ff00;
+      color: #00ff00;
+      padding: 16px;
+      border-radius: 12px;
+      cursor: pointer;
+      font-size: 20px;
+      font-weight: bold;
+      transition: all 0.3s;
+    }
+    
+    .mbtn:hover {
+      background: #00ff00;
+      color: #000;
+      box-shadow: 0 0 15px #00ff00;
+      transform: translateY(-2px);
+    }
+    
+    .stop {
+      border-color: #f00 !important;
+      color: #f00 !important;
+    }
+    
+    .stop:hover {
+      background: #f00 !important;
+      color: #fff !important;
+    }
+    
+    .led {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-left: 8px;
+      animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    
+    .ok { background: #0f0; box-shadow: 0 0 8px #0f0; }
+    .warn { background: #ff0; box-shadow: 0 0 8px #ff0; }
+    .err { background: #f00; box-shadow: 0 0 8px #f00; }
+    
+    .audio {
+      grid-area: audio;
+      background: rgba(40, 20, 40, 0.95);
+    }
+    
+    .group {
+      margin: 15px 0;
+      padding: 12px;
+      border: 1px solid #444;
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.2);
+    }
+    
+    .group h4 {
+      color: #ff6600;
+      margin-bottom: 10px;
+      font-weight: bold;
+    }
+    
+    .slider {
+      width: 100%;
+      background: #555;
+      -webkit-appearance: none;
+      height: 10px;
+      border-radius: 5px;
+      outline: none;
+    }
+    
+    .slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #ff8c00;
+      cursor: pointer;
+    }
+    
+    .vu {
+      width: 100%;
+      height: 24px;
+      background: #000;
+      border: 2px solid #ff8c00;
+      border-radius: 6px;
+      margin: 10px 0;
+      overflow: hidden;
+    }
+    
+    .vubar {
+      height: 100%;
+      background: linear-gradient(90deg, #44ff44, #ffaa00, #ff4444);
+      border-radius: 4px;
+      transition: width 0.1s;
+      width: 0%;
+    }
+    
+    .res {
+      display: flex;
+      gap: 8px;
+      margin: 10px 0;
+    }
+    
+    .res .r {
+      background: #555;
+      border: 2px solid #ff8c00;
+      color: #cccccc;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: all 0.2s;
+    }
+    
+    .res .active {
+      background: #ff8c00;
+      color: #000;
+      font-weight: bold;
+    }
+    
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    
+    .bat {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 12px 0;
+    }
+    
+    .batbar {
+      flex: 1;
+      height: 18px;
+      background: #333;
+      border: 2px solid #ff8c00;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    
+    .batfill {
+      height: 100%;
+      border-radius: 8px;
+      transition: width 0.5s, background 0.5s;
+    }
+    
+    .sound {
+      grid-area: sound;
+      background: rgba(40, 30, 20, 0.95);
+    }
+    
+    .soundgrid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    
+    .sbtn {
+      background: linear-gradient(145deg, #333, #444);
+      border: 2px solid #ff6600;
+      color: #ff6600;
+      padding: 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.2s;
+    }
+    
+    .sbtn:hover {
+      background: #ff6600;
+      color: #000;
+      transform: translateY(-1px);
+    }
+    
+    .log {
+      grid-area: log;
+      background: rgba(0, 0, 0, 0.9);
+      border: 2px solid #808080;
+      border-radius: 10px;
+      padding: 12px;
+      font-size: 12px;
+      overflow-y: auto;
+      max-height: 60px;
+      font-family: 'Courier New', monospace;
+      color: #cccccc;
+    }
+    
+    h3 {
+      margin-bottom: 10px;
+      font-weight: bold;
+    }
+    
+    @media (max-width: 1000px) {
+      .container {
+        grid-template-areas:
+          "tts tts"
+          "video video"
+          "motor audio"
+          "sound sound"
+          "log log";
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+    
+    @media (max-width: 600px) {
+      .container {
+        grid-template-areas:
+          "tts"
+          "video"
+          "motor"
+          "audio"
+          "sound"
+          "log";
+        grid-template-columns: 1fr;
+        padding: 10px;
+        gap: 10px;
+      }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="panel tts">
+    <div id="recent" class="pills" style="display:none;">
+      <div class="pill" onclick="pick(recentPhrases[0])" id="recent1"></div>
+      <div class="pill" onclick="pick(recentPhrases[1])" id="recent2"></div>
+    </div>
+    <div id="predictions" class="pills" style="display:none;"></div>
+    <div id="diacritics" class="pills" style="display:none;">
+      <div class="pill diacritic-pill" onclick="insertDiacritic('ă')">ă</div>
+      <div class="pill diacritic-pill" onclick="insertDiacritic('â')">â</div>
+      <div class="pill diacritic-pill" onclick="insertDiacritic('î')">î</div>
+      <div class="pill diacritic-pill" onclick="insertDiacritic('ș')">ș</div>
+      <div class="pill diacritic-pill" onclick="insertDiacritic('ț')">ț</div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex:1">
+      <input id="tts" placeholder="Type message to speak..." oninput="predictText(this.value)" onkeydown="handleTTSKeydown(event)" style="flex:1" />
+      <button class="btn" onclick="clearText()" title="Clear text">×</button>
+    </div>
+    <button class="btn btn-orange" onclick="speak()">Speak</button>
+    <div class="lang">
+      <button id="len" class="active" onclick="setLang('en')">EN</button>
+      <button id="lro" onclick="setLang('ro')">RO</button>
+      <button id="lde" onclick="setLang('de')">DE</button>
+    </div>
+  </div>
+
+  <div class="panel motor">
+    <h3>Motor <span id="mled" class="led warn"></span></h3>
+    <div class="grid">
+      <div></div>
+      <button class="mbtn" onmousedown="go('forward')" onmouseup="stopM()">▲</button>
+      <div></div>
+      <button class="mbtn" onmousedown="go('left')" onmouseup="stopM()">◀</button>
+      <button class="mbtn stop" onclick="estop()">⬛</button>
+      <button class="mbtn" onmousedown="go('right')" onmouseup="stopM()">▶</button>
+      <div></div>
+      <button class="mbtn" onmousedown="go('backward')" onmouseup="stopM()">▼</button>
+      <div></div>
+    </div>
+    <div class="row">
+      <span>Speed:</span>
+      <input id="spd" type="range" class="slider" min="50" max="255" value="150" oninput="document.getElementById('spdv').textContent=this.value" />
+      <span id="spdv" style="min-width:40px;color:#ff6600;font-weight:bold">150</span>
+    </div>
+    <div class="bat">
+      <span>Battery</span>
+      <div class="batbar">
+        <div id="batf" class="batfill" style="width:75%;background:#0f0"></div>
+      </div>
+      <span id="batp">75%</span>
+    </div>
+  </div>
+
+  <div class="panel video">
+    <img id="vid" src="/video" alt="Video feed" />
+    <div class="video-info-bar">
+      <div class="info-item">
+        <span class="info-label">Bandwidth:</span>
+        <span id="bwtext">-- KB/s</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">Total:</span>
+        <span id="total-data">0 MB</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">Time:</span>
+        <div id="datetime">Loading...</div>
+      </div>
+      <div class="info-item">
+        <span class="info-label">Resolution:</span>
+        <span id="resolution-display">720p</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">FPS:</span>
+        <span id="fps">--</span>
+      </div>
+    </div>
+    <div style="margin-top:8px">
+      <span id="cstat" style="font-size:12px;color:#0f0">Camera: Initializing</span>
+      <span id="uptime" style="margin-left:15px;font-size:10px;opacity:0.8">Uptime: 00:00:00</span>
+      <button class="btn" onclick="refreshVideo()" style="margin-left:10px;padding:2px 6px;font-size:10px;">Refresh Video</button>
+    </div>
+  </div>
+
+  <div class="panel audio">
+    <h3>Media Controls</h3>
+    <div class="group">
+      <h4>Resolution</h4>
+      <div class="res">
+        <button id="r480p" class="r" onclick="setRes('480p')">480p</button>
+        <button id="r720p" class="r active" onclick="setRes('720p')">720p</button>
+        <button id="r1080p" class="r" onclick="setRes('1080p')">1080p</button>
+      </div>
+      <div class="row" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" onclick="snap()">Snapshot</button>
+        <button class="btn" onclick="statusAll()">System</button>
+        <button class="btn" onclick="recStart()">Start Rec</button>
+        <button class="btn" onclick="recStop()">Stop Rec</button>
+        <button class="btn" onclick="rebootSystem()" style="border-color:#ff0000;color:#ff0000">Reboot</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <h4>Microphone</h4>
+      <div class="vu">
+        <div id="vu" class="vubar"></div>
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:8px">
+        <button id="micbtn" class="btn" onclick="toggleMicrophone()" style="flex:1">Start Audio</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span id="mic-status" style="font-size:10px;color:#808080;flex:1">Ready</span>
+      </div>
+    </div>
+
+    <div class="group">
+      <h4>Speaker</h4>
+      <input id="vol" type="range" class="slider" min="0" max="100" value="70" oninput="setVol(this.value)" />
+      <div class="row">
+        <span>Volume: <span id="volv">70%</span></span>
+        <button id="mutebtn" class="btn" onclick="toggleMute()">Sound</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel sound">
+    <h3>Sound Effects</h3>
+    <div class="soundgrid">
+      <button class="sbtn" onclick="beep(0)">1</button>
+      <button class="sbtn" onclick="beep(1)">2</button>
+      <button class="sbtn" onclick="beep(2)">3</button>
+      <button class="sbtn" onclick="beep(3)">4</button>
+      <button class="sbtn" onclick="beep(4)">5</button>
+      <button class="sbtn" onclick="beep(5)">6</button>
+      <button class="sbtn" onclick="beep(6)">7</button>
+      <button class="sbtn" onclick="beep(7)">8</button>
+      <button class="sbtn" onclick="beep(8)">9</button>
+      <button class="sbtn" onclick="beep(9)">10</button>
+    </div>
+  </div>
+
+  <div id="log" class="panel log">Avatar Tank System Ready</div>
+</div>
+
+<script>
+// Global variables
+let lang = 'en';
+let predictionTimeout = null;
+let recentPhrases = [];
+let startTime = Date.now();
+let frameCount = 0;
+let lastFrameTime = Date.now();
+let currentFPS = 0;
+let bandwidthSamples = [];
+let vuMeterActive = false;
+let recordingActive = false;
+let totalDataUsed = 0;
+let lastBandwidthUpdate = Date.now();
+let audioActive = false;
+let audioContext = null;
+let socket = null;
+let muted = false;
+
+// Utility functions
+const sid = (id) => document.getElementById(id);
+const log = (m) => {
+  const logEl = sid('log');
+  if (logEl) logEl.textContent = '[' + new Date().toLocaleTimeString() + '] ' + m;
+  console.log('[Frontend]', m);
+};
+
+// Initialize WebSocket
+function initWebSocket() {
+  if (socket && socket.connected) return socket;
+  
+  socket = io({
+    timeout: 10000,
+    reconnection: true,
+    reconnectionAttempts: 5,
+    reconnectionDelay: 1000
+  });
+  
+  socket.on('connect', () => {
+    console.log('Socket connected:', socket.id);
+    updateMicStatus('WebSocket ready');
+  });
+  
+  socket.on('audio_status', (data) => {
+    if (data.status === 'error') {
+      updateMicStatus('Audio error: ' + (data.message || 'Unknown'));
+      audioActive = false;
+      updateMicButton();
+    } else if (data.status === 'started') {
+      updateMicStatus('Audio streaming active');
+    }
+  });
+  
+  socket.on('audio_data', (data) => {
+    if (audioContext) {
+      try {
+        playAudioChunk(data);
+      } catch (e) {
+        console.error('Audio playback error:', e);
+      }
+    }
+  });
+  
+  return socket;
+}
+
+// Initialize Web Audio
+function initWebAudio() {
+  if (audioContext) return true;
+  
+  try {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 22050,
+      latencyHint: 'interactive'
+    });
+    
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
+    
+    return true;
+  } catch (e) {
+    console.error('Web Audio initialization failed:', e);
+    return false;
+  }
+}
+
+// Periodic motor status check
+async function checkMotorStatus() {
+  try {
+    const response = await fetch('/system_status');
+    const status = await response.json();
+    const led = sid('mled');
+    
+    // Check both 'ok' and 'connected' for backward compatibility
+    const motorOk = status.motors.ok || status.motors.connected || false;
+    if (led) led.className = 'led ' + (motorOk ? 'ok' : 'err');
+  } catch (e) {
+    console.log('Motor status check failed:', e);
+  }
+}
+
+// Audio processing
+function playAudioChunk(audioData) {
+  if (!audioActive || !audioContext) return;
+  
+  try {
+    if (!audioData || !audioData.data) return;
+    
+    const binaryString = atob(audioData.data);
+    const arrayBuffer = new ArrayBuffer(binaryString.length);
+    const uint8Array = new Uint8Array(arrayBuffer);
+    
+    for (let i = 0; i < binaryString.length; i++) {
+      uint8Array[i] = binaryString.charCodeAt(i);
+    }
+    
+    if (arrayBuffer.byteLength < 100) return;
+    
+    const samples = new Int16Array(arrayBuffer);
+    const floatSamples = new Float32Array(samples.length);
+    
+    let sumSquares = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const sample = samples[i] / 32768.0;
+      floatSamples[i] = sample;
+      sumSquares += sample * sample;
+    }
+    
+    const rms = Math.sqrt(sumSquares / samples.length);
+    window.lastAudioRMS = rms;
+    
+    const audioBuffer = audioContext.createBuffer(1, floatSamples.length, 22050);
+    audioBuffer.copyToChannel(floatSamples, 0);
+    
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioContext.destination);
+    source.start();
+    
+  } catch (e) {
+    console.error('playAudioChunk error:', e);
+  }
+}
+
+// UI Update functions
+function updateDateTime() {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('en-GB', {hour12: false});
+  const dateStr = now.toLocaleDateString('en-GB');
+  const datetimeEl = sid('datetime');
+  if (datetimeEl) {
+    datetimeEl.innerHTML = timeStr + '<br><small>' + dateStr + '</small>';
+  }
+  
+  const uptimeEl = sid('uptime');
+  if (uptimeEl) {
+    const uptime = Date.now() - startTime;
+    const hours = Math.floor(uptime / 3600000);
+    const minutes = Math.floor((uptime % 3600000) / 60000);
+    const seconds = Math.floor((uptime % 60000) / 1000);
+    uptimeEl.textContent = 'Uptime: ' + 
+      hours.toString().padStart(2,'0') + ':' + 
+      minutes.toString().padStart(2,'0') + ':' + 
+      seconds.toString().padStart(2,'0');
+  }
+}
+
+function updateBandwidth() {
+  const vid = sid('vid');
+  const now = Date.now();
+  
+  if (vid && vid.naturalWidth > 0) {
+    frameCount++;
+    const timeDiff = now - lastFrameTime;
+    
+    if (timeDiff > 1000) {
+      currentFPS = frameCount / (timeDiff / 1000);
+      frameCount = 0;
+      lastFrameTime = now;
+      
+      const fpsEl = sid('fps');
+      if (fpsEl) fpsEl.textContent = currentFPS.toFixed(1);
+      
+      // Calculate bandwidth based on actual resolution
+      let bandwidthKBps = 0;
+      const resDisplay = sid('resolution-display');
+      const currentRes = resDisplay ? resDisplay.textContent : '720p';
+      
+      // Debugging: log the current resolution
+      console.log('[Bandwidth] Current resolution:', currentRes);
+      
+      // More realistic bandwidth calculation based on resolution
+      switch(currentRes) {
+        case '480p':
+          bandwidthKBps = Math.round(currentFPS * 30); // Lower bandwidth for 480p
+          break;
+        case '720p':
+          bandwidthKBps = Math.round(currentFPS * 50); // Medium bandwidth for 720p
+          break;
+        case '1080p':
+          bandwidthKBps = Math.round(currentFPS * 80); // Higher bandwidth for 1080p
+          break;
+        default:
+          bandwidthKBps = Math.round(currentFPS * 50);
+          console.log('[Bandwidth] Unknown resolution, using default calculation');
+      }
+      
+      const bwText = sid('bwtext');
+      if (bwText) bwText.textContent = bandwidthKBps + ' KB/s';
+      
+      const bandwidthTimeDiff = (now - lastBandwidthUpdate) / 1000;
+      if (bandwidthTimeDiff > 0) {
+        totalDataUsed += (bandwidthKBps * bandwidthTimeDiff);
+        lastBandwidthUpdate = now;
+        
+        const totalDataEl = sid('total-data');
+        if (totalDataEl) {
+          const totalMB = totalDataUsed / 1024;
+          totalDataEl.textContent = totalMB.toFixed(1) + ' MB';
+        }
+      }
+    }
+  }
+}
+
+function enhancedVUMeter() {
+  const vuBar = sid('vu');
+  if (!vuBar) return;
+  
+  if (vuMeterActive && window.lastAudioRMS !== undefined) {
+    let rms = Math.max(0, Math.min(1, window.lastAudioRMS || 0));
+    let level = Math.round(rms * 100 * 5); // Amplify for visibility
+    level = Math.max(0, Math.min(100, level));
+    vuBar.style.width = level + '%';
+  } else {
+    vuBar.style.width = '0%';
+  }
+}
+
+// Text handling
+function clearText() {
+  const input = sid('tts');
+  if (input) {
+    input.value = '';
+    input.focus();
+    const predictions = sid('predictions');
+    if (predictions) predictions.style.display = 'none';
+    log('Text cleared');
+  }
+}
+
+function pick(t) {
+  const input = sid('tts');
+  if (input) {
+    const words = input.value.trim().split(/\s+/);
+    if (words.length > 0 && input.value.trim().length > 0) {
+      words[words.length - 1] = t;
+      input.value = words.join(' ');
+    } else {
+      input.value = t;
+    }
+    input.value += ' ';
+    input.focus();
+    const predictions = sid('predictions');
+    if (predictions) predictions.style.display = 'none';
+  }
+}
+
+async function predictText(query) {
+  clearTimeout(predictionTimeout);
+  const predictions = sid('predictions');
+  
+  if (!query || query.length < 1) {
+    if (predictions) predictions.style.display = 'none';
+    return;
+  }
+  
+  predictionTimeout = setTimeout(async () => {
+    try {
+      const response = await fetch('/predict?q=' + encodeURIComponent(query) + '&limit=3');
+      const data = await response.json();
+      
+      if (data.ok && data.items && data.items.length > 0 && predictions) {
+        predictions.innerHTML = '';
+        data.items.forEach(item => {
+          const pill = document.createElement('div');
+          pill.className = 'pill';
+          pill.textContent = item;
+          pill.onclick = () => {
+            pick(item);
+            predictions.style.display = 'none';
+          };
+          predictions.appendChild(pill);
+        });
+        predictions.style.display = 'flex';
+      } else {
+        if (predictions) predictions.style.display = 'none';
+      }
+    } catch (e) {
+      if (predictions) predictions.style.display = 'none';
+    }
+  }, 200);
+}
+
+function handleTTSKeydown(event) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    speak();
+  }
+  if (event.key === 'Escape') {
+    const predictions = sid('predictions');
+    if (predictions) predictions.style.display = 'none';
+  }
+}
+
+// Speech functions
+async function speak() {
+  const textEl = sid('tts');
+  if (!textEl) return;
+  const text = textEl.value.trim();
+  if (!text) return;
+  
+  log('Speaking...');
+  try {
+    const response = await fetch('/speak', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: text, language: lang})
+    });
+    const result = await response.json();
+    
+    if (result.ok) {
+      log('Speech: ' + result.msg);
+    } else {
+      log('Speech error: ' + result.msg);
+    }
+  } catch (e) {
+    log('Speak error: ' + e.message);
+  }
+}
+
+async function setLang(l) {
+  lang = l;
+  ['len', 'lro', 'lde'].forEach(id => {
+    const el = sid(id);
+    if (el) el.classList.remove('active');
+  });
+  const mapping = {'en': 'len', 'ro': 'lro', 'de': 'lde'};
+  const activeEl = sid(mapping[l]);
+  if (activeEl) activeEl.classList.add('active');
+  
+  const diacriticsEl = sid('diacritics');
+  if (diacriticsEl) {
+    diacriticsEl.style.display = (l === 'ro') ? 'flex' : 'none';
+  }
+  
+  try {
+    await fetch('/set_language', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({language: l})
+    });
+    log('Language: ' + l.toUpperCase());
+  } catch (e) {
+    log('Set language error: ' + e.message);
+  }
+}
+
+function insertDiacritic(char) {
+  const input = sid('tts');
+  if (!input) return;
+  
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const text = input.value;
+  
+  input.value = text.substring(0, start) + char + text.substring(end);
+  input.setSelectionRange(start + 1, start + 1);
+  input.focus();
+  
+  predictText(input.value);
+  log('Inserted: ' + char);
+}
+
+// Motor control
+let moving = false;
+let currentDirection = null;
+
+async function mcmd(dir, speed) {
+  const led = sid('mled');
+  if (led) led.className = 'led warn';
+  
+  try {
+    const response = await fetch('/motor/' + dir, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({speed: parseInt(speed)})
+    });
+    const result = await response.json();
+    
+    if (led) {
+      led.className = 'led ' + (result.ok ? 'ok' : 'err');
+    }
+  } catch (e) {
+    const led = sid('mled');
+    if (led) led.className = 'led err';
+  }
+}
+
+function go(direction) {
+  if (moving && currentDirection === direction) return;
+  moving = true;
+  currentDirection = direction;
+  const speedEl = sid('spd');
+  const speed = speedEl ? speedEl.value : 150;
+  mcmd(direction, speed);
+  log('Move ' + direction);
+}
+
+function stopM() {
+  if (!moving) return;
+  moving = false;
+  currentDirection = null;
+  const speedEl = sid('spd');
+  const speed = speedEl ? speedEl.value : 150;
+  mcmd('stop', speed);
+  log('Stop');
+}
+
+function estop() {
+  moving = false;
+  currentDirection = null;
+  const speedEl = sid('spd');
+  const speed = speedEl ? speedEl.value : 150;
+  mcmd('stop', speed);
+  log('EMERGENCY STOP');
+}
+
+// Camera functions
+async function setRes(resolution) {
+  log('Set resolution ' + resolution + '...');
+  try {
+    const response = await fetch('/set_resolution', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({resolution: resolution})
+    });
+    const result = await response.json();
+    
+    console.log('[SetRes] Server response:', result);
+    
+    if (result.ok) {
+      // Update resolution display
+      const resDisplay = sid('resolution-display');
+      if (resDisplay) {
+        const displayValue = result.resolution || resolution;
+        resDisplay.textContent = displayValue;
+        console.log('[SetRes] Resolution display updated to:', displayValue);
+      }
+      
+      // Update active button styling
+      ['r480p', 'r720p', 'r1080p'].forEach(id => {
+        const el = sid(id);
+        if (el) el.classList.remove('active');
+      });
+      const activeEl = sid('r' + resolution);
+      if (activeEl) activeEl.classList.add('active');
+      
+      // Refresh video stream
+      setTimeout(() => {
+        const vid = sid('vid');
+        if (vid) {
+          const src = vid.src;
+          vid.src = '';
+          vid.src = src + '?t=' + Date.now();
+        }
+      }, 800);
+      log('Resolution changed to ' + (result.resolution || resolution));
+    } else {
+      log('Resolution change failed: ' + result.msg);
+    }
+  } catch (e) {
+    log('Set resolution error: ' + e.message);
+  }
+}
+
+// Manual video refresh function
+function refreshVideo() {
+  const vid = sid('vid');
+  if (vid) {
+    const src = vid.src.split('?')[0]; // Remove any existing query parameters
+    vid.src = '';
+    vid.src = src + '?refresh=' + Date.now();
+    log('Video stream refreshed');
+  }
+}
+
+// System functions
+async function statusAll() {
+  try {
+    const response = await fetch('/system_status');
+    const status = await response.json();
+    console.log('[StatusAll] System status:', status);
+    
+    const camera = status.camera;
+    const el = sid('cstat');
+    
+    if (el) {
+      if (camera.is_dummy) {
+        el.textContent = 'Camera: DUMMY (no physical camera)';
+        el.style.color = '#ff0';
+      } else if (camera.ok) {
+        el.textContent = 'Camera: ' + camera.device;
+        el.style.color = '#0f0';
+      } else {
+        el.textContent = 'Camera: not available';
+        el.style.color = '#f00';
+      }
+    }
+    
+    // Update resolution display
+    const resDisplay = sid('resolution-display');
+    if (resDisplay && camera.resolution) {
+      resDisplay.textContent = camera.resolution;
+      console.log('[StatusAll] Resolution display updated to:', camera.resolution);
+    }
+    
+    const led = sid('mled');
+    // Check both 'ok' and 'connected' for backward compatibility
+    const motorOk = status.motors.ok || status.motors.connected || false;
+    if (led) led.className = 'led ' + (motorOk ? 'ok' : 'err');
+    
+    // If motors are not connected, try to reconnect
+    if (!motorOk) {
+      try {
+        const reconnectResponse = await fetch('/motor/reconnect', {method: 'POST'});
+        const reconnectResult = await reconnectResponse.json();
+        console.log('[StatusAll] Motor reconnect result:', reconnectResult);
+        if (reconnectResult.ok) {
+          // Try status again after reconnect
+          setTimeout(async () => {
+            const newResponse = await fetch('/system_status');
+            const newStatus = await newResponse.json();
+            const newMotorOk = newStatus.motors.ok || newStatus.motors.connected || false;
+            if (led) led.className = 'led ' + (newMotorOk ? 'ok' : 'err');
+          }, 1000);
+        }
+      } catch (reconnectError) {
+        console.log('Motor reconnect failed:', reconnectError);
+      }
+    }
+    
+    log('System status updated');
+  } catch (e) {
+    log('Status error: ' + e.message);
+  }
+}
+
+// Recording functions
+async function recStart() {
+  log('Recording start...');
+  try {
+    if (audioActive) {
+      await toggleMicrophone();
+      log('Audio stream paused for recording');
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    recordingActive = true;
+    
+    const response = await fetch('/start_recording', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({audio_bitrate: '96k'})
+    });
+    const result = await response.json();
+    
+    if (result.ok) {
+      let msg = 'Recording -> ' + result.file;
+      if (result.audio === false) {
+        msg += ' (video only)';
+      }
+      log(msg);
+    } else {
+      log('Rec error: ' + result.msg);
+    }
+  } catch (e) {
+    log('Recording start error: ' + e.message);
+    recordingActive = false;
+  }
+}
+
+async function recStop() {
+  log('Recording stop...');
+  try {
+    const response = await fetch('/stop_recording', {method: 'POST'});
+    const result = await response.json();
+    
+    recordingActive = false;
+    
+    if (!audioActive) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await toggleMicrophone();
+      log('Audio stream resumed');
+    }
+    
+    log(result.ok ? ('Stopped. Last -> ' + (result.file || 'n/a')) : ('Stop error: ' + result.msg));
+  } catch (e) {
+    log('Recording stop error: ' + e.message);
+  }
+}
+
+// Audio functions
+async function toggleMicrophone() {
+  try {
+    if (audioActive) {
+      audioActive = false;
+      vuMeterActive = false;
+      if (socket) {
+        socket.emit('stop_simple_audio');
+      }
+      updateMicStatus('Audio stopped');
+    } else {
+      updateMicStatus('Starting audio...');
+      
+      if (!audioContext) {
+        initWebAudio();
+      }
+      
+      if (!socket) {
+        initWebSocket();
+      }
+      
+      if (socket) {
+        socket.emit('start_simple_audio');
+        audioActive = true;
+        vuMeterActive = true;
+        updateMicStatus('Audio streaming active');
+      } else {
+        updateMicStatus('Failed to start audio');
+      }
+    }
+    
+    updateMicButton();
+  } catch (e) {
+    updateMicStatus('Error: ' + e.message);
+    audioActive = false;
+    updateMicButton();
+  }
+}
+
+function updateMicButton() {
+  const btn = sid('micbtn');
+  if (btn) {
+    if (audioActive) {
+      btn.textContent = 'Stop Audio';
+      btn.style.background = '#ff4444';
+      btn.style.color = '#fff';
+    } else {
+      btn.textContent = 'Start Audio';
+      btn.style.background = '';
+      btn.style.color = '';
+    }
+  }
+}
+
+function updateMicStatus(status) {
+  const statusEl = sid('mic-status');
+  if (statusEl) {
+    statusEl.textContent = status;
+  }
+}
+
+async function testMic() {
+  log('Testing microphone...');
+  try {
+    const response = await fetch('/mic_test');
+    if (response.ok) {
+      log('Mic test completed - downloading file');
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'mic_test.wav';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } else {
+      log('Mic test failed');
+    }
+  } catch (e) {
+    log('Mic test error: ' + e.message);
+  }
+}
+
+function testAudioTone() {
+  log('Testing audio tone...');
+  if (socket) {
+    socket.emit('test_audio_tone');
+    updateMicStatus('Playing test tone...');
+  } else {
+    updateMicStatus('WebSocket not connected');
+  }
+}
+
+// Volume control
+async function setVol(volume) {
+  const volEl = sid('volv');
+  if (volEl) volEl.textContent = volume + '%';
+  try {
+    await fetch('/audio/set_volume', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type: 'speaker', volume: parseInt(volume)})
+    });
+  } catch (e) {
+    log('Set volume error: ' + e.message);
+  }
+}
+
+async function toggleMute() {
+  muted = !muted;
+  const btn = sid('mutebtn');
+  const slider = sid('vol');
+  
+  if (btn && slider) {
+    if (muted) {
+      btn.textContent = 'Muted';
+      btn.style.background = '#f00';
+      slider.disabled = true;
+      try {
+        await fetch('/audio/set_volume', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({type: 'speaker', mute: true})
+        });
+      } catch (e) {
+        log('Mute error: ' + e.message);
+      }
+    } else {
+      btn.textContent = 'Sound';
+      btn.style.background = '';
+      slider.disabled = false;
+      try {
+        await fetch('/audio/set_volume', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({type: 'speaker', volume: parseInt(slider.value), mute: false})
+        });
+      } catch (e) {
+        log('Unmute error: ' + e.message);
+      }
+    }
+  }
+}
+
+// Sound effects
+async function beep(soundId) {
+  try {
+    const response = await fetch('/play_sound/' + soundId, {method: 'POST'});
+    const result = await response.json();
+    log(result.ok ? result.msg : ('Sound error: ' + result.msg));
+  } catch (e) {
+    log('Beep error: ' + e.message);
+  }
+}
+
+// System control
+async function rebootSystem() {
+  if (!confirm('REBOOT SYSTEM? This will restart the entire device. Are you sure?')) return;
+  log('Initiating system reboot...');
+  try {
+    const response = await fetch('/system/reboot', {method: 'POST'});
+    const result = await response.json();
+    if (result.ok) {
+      log('Reboot command sent successfully');
+      setTimeout(() => log('System should be rebooting now...'), 3000);
+    } else {
+      log('Reboot failed: ' + result.msg);
+    }
+  } catch (e) {
+    log('Reboot request failed: ' + e.message);
+  }
+}
+
+// Battery monitoring
+async function updateBattery() {
+  try {
+    const response = await fetch('/battery');
+    const battery = await response.json();
+    const fill = sid('batf');
+    const percentage = sid('batp');
+    
+    if (fill && percentage) {
+      fill.style.width = battery.percentage + '%';
+      percentage.textContent = battery.percentage.toFixed(0) + '%';
+      
+      if (battery.percentage > 50) {
+        fill.style.background = '#0f0';
+      } else if (battery.percentage > 20) {
+        fill.style.background = '#ff0';
+      } else {
+        fill.style.background = '#f00';
+      }
+    }
+  } catch (e) {
+    console.error('Battery update error:', e);
+  }
+}
+
+// Keyboard controls
+const keyState = {};
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  
+  if (keyState[e.key]) return;
+  keyState[e.key] = true;
+  
+  switch (e.key.toLowerCase()) {
+    case 'w': go('forward'); e.preventDefault(); break;
+    case 's': go('backward'); e.preventDefault(); break;
+    case 'a': go('left'); e.preventDefault(); break;
+    case 'd': go('right'); e.preventDefault(); break;
+    case ' ': estop(); e.preventDefault(); break;
+  }
+});
+
+document.addEventListener('keyup', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  
+  if (!keyState[e.key]) return;
+  keyState[e.key] = false;
+  
+  if (['w', 's', 'a', 'd'].includes(e.key.toLowerCase())) {
+    stopM();
+  }
+});
+
+// Initialization
+function init() {
+  log('Initializing Avatar Tank Control System...');
+  
+  // Initialize connections
+  initWebSocket();
+  
+  // Set initial state
+  setLang('en');
+  updateBattery();
+  setInterval(updateBattery, 5000);
+  
+  // Get initial system status
+  statusAll();
+  setInterval(statusAll, 30000);
+  
+  // Start monitoring systems
+  updateDateTime();
+  setInterval(updateDateTime, 1000);
+  setInterval(updateBandwidth, 100);
+  setInterval(enhancedVUMeter, 50);
+  
+  // Periodic motor status check
+  setInterval(checkMotorStatus, 5000); // Check every 5 seconds
+  
+  // Monitor video stream
+  setInterval(() => {
+    const vid = sid('vid');
+    if (vid && vid.naturalWidth === 0) {
+      refreshVideo(); // Use our refresh function
+    }
+  }, 10000);
+  
+  // Test system connectivity
+  setTimeout(() => {
+    fetch('/system_status')
+      .then(response => response.json())
+      .then(data => {
+        const camera = data.camera ? (data.camera.is_dummy ? 'Dummy' : 'Working') : 'Failed';
+        const motors = data.motors ? (data.motors.ok ? 'Connected' : 'Failed') : 'Failed';
+        const tts = data.tts ? (data.tts.ok ? 'Ready' : 'Failed') : 'Failed';
+        log('Systems: Camera=' + camera + ', Motors=' + motors + ', TTS=' + tts);
+      })
+      .catch(e => {
+        log('System status check failed: ' + e.message);
+      });
+  }, 3000);
+  
+  vuMeterActive = false;
+  log('All systems initialized successfully');
+}
+
+// Start initialization when DOM is ready
+document.addEventListener('DOMContentLoaded', init);
+
+console.log('Avatar Tank interface loaded successfully');
+</script>
+</body>
+</html>
