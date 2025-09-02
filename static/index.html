@@ -482,12 +482,8 @@
       <input id="spd" type="range" class="slider" min="50" max="255" value="150" oninput="document.getElementById('spdv').textContent=this.value" />
       <span id="spdv" style="min-width:40px;color:#ff6600;font-weight:bold">150</span>
     </div>
-    <div class="bat">
-      <span>Battery</span>
-      <div class="batbar">
-        <div id="batf" class="batfill" style="width:75%;background:#0f0"></div>
-      </div>
-      <span id="batp">75%</span>
+    <div class="row" style="margin-top: 10px;">
+      <button class="btn" onclick="testMotors()" style="flex:1">Test Motors</button>
     </div>
   </div>
 
@@ -514,6 +510,11 @@
         <span class="info-label">FPS:</span>
         <span id="fps">--</span>
       </div>
+      <div class="info-item">
+        <span class="info-label">Battery:</span>
+        <span id="battery-display">--%</span>
+        <span id="voltage-display" style="margin-left:5px">(--V)</span>
+      </div>
     </div>
     <div style="margin-top:8px">
       <span id="cstat" style="font-size:12px;color:#0f0">Camera: Initializing</span>
@@ -532,11 +533,12 @@
         <button id="r1080p" class="r" onclick="setRes('1080p')">1080p</button>
       </div>
       <div class="row" style="gap:6px;flex-wrap:wrap">
-        <button class="btn" onclick="snap()">Snapshot</button>
-        <button class="btn" onclick="statusAll()">System</button>
-        <button class="btn" onclick="recStart()">Start Rec</button>
-        <button class="btn" onclick="recStop()">Stop Rec</button>
-        <button class="btn" onclick="rebootSystem()" style="border-color:#ff0000;color:#ff0000">Reboot</button>
+        <button class="btn" onclick="snap()" style="flex:1">Snapshot</button>
+        <button class="btn" id="recordBtn" onclick="toggleRecording()" style="flex:1">Start Rec</button>
+      </div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button class="btn" onclick="statusAll()" style="flex:1">System</button>
+        <button class="btn" onclick="rebootSystem()" style="flex:1;border-color:#ff0000;color:#ff0000">Reboot</button>
       </div>
     </div>
 
@@ -545,8 +547,9 @@
       <div class="vu">
         <div id="vu" class="vubar"></div>
       </div>
-      <div class="row" style="flex-wrap:wrap;gap:8px">
+      <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:8px">
         <button id="micbtn" class="btn" onclick="toggleMicrophone()" style="flex:1">Start Audio</button>
+        <button class="btn" onclick="testMic()" style="flex:1">Test Mic</button>
       </div>
       <div class="row" style="margin-top:8px">
         <span id="mic-status" style="font-size:10px;color:#808080;flex:1">Ready</span>
@@ -654,7 +657,7 @@ function initWebAudio() {
   
   try {
     audioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 22050,
+      sampleRate: 44100,  // Updated to match the new audio format
       latencyHint: 'interactive'
     });
     
@@ -714,7 +717,7 @@ function playAudioChunk(audioData) {
     const rms = Math.sqrt(sumSquares / samples.length);
     window.lastAudioRMS = rms;
     
-    const audioBuffer = audioContext.createBuffer(1, floatSamples.length, 22050);
+    const audioBuffer = audioContext.createBuffer(1, floatSamples.length, 44100);  // Updated sample rate
     audioBuffer.copyToChannel(floatSamples, 0);
     
     const source = audioContext.createBufferSource();
@@ -766,32 +769,43 @@ function updateBandwidth() {
       const fpsEl = sid('fps');
       if (fpsEl) fpsEl.textContent = currentFPS.toFixed(1);
       
-      // Calculate bandwidth based on actual resolution
+      // Calculate bandwidth based on actual resolution and frame size
       let bandwidthKBps = 0;
       const resDisplay = sid('resolution-display');
       const currentRes = resDisplay ? resDisplay.textContent : '720p';
       
-      // Debugging: log the current resolution
-      console.log('[Bandwidth] Current resolution:', currentRes);
-      
-      // More realistic bandwidth calculation based on resolution
+      // More realistic bandwidth calculation based on resolution and actual frame size
+      // Base values in KB per frame
+      let baseFrameSizeKB = 0;
       switch(currentRes) {
         case '480p':
-          bandwidthKBps = Math.round(currentFPS * 30); // Lower bandwidth for 480p
+          baseFrameSizeKB = 30; // Lower bandwidth for 480p
           break;
         case '720p':
-          bandwidthKBps = Math.round(currentFPS * 50); // Medium bandwidth for 720p
+          baseFrameSizeKB = 50; // Medium bandwidth for 720p
           break;
         case '1080p':
-          bandwidthKBps = Math.round(currentFPS * 80); // Higher bandwidth for 1080p
+          baseFrameSizeKB = 80; // Higher bandwidth for 1080p
           break;
         default:
-          bandwidthKBps = Math.round(currentFPS * 50);
-          console.log('[Bandwidth] Unknown resolution, using default calculation');
+          baseFrameSizeKB = 50;
       }
       
+      // Calculate actual bandwidth (frame size * FPS)
+      bandwidthKBps = Math.round(baseFrameSizeKB * currentFPS);
+      
       const bwText = sid('bwtext');
-      if (bwText) bwText.textContent = bandwidthKBps + ' KB/s';
+      if (bwText) {
+        bwText.textContent = bandwidthKBps + ' KB/s';
+        // Apply color coding: green <100, yellow <300, red >=300
+        if (bandwidthKBps < 100) {
+          bwText.style.color = '#0f0'; // Green
+        } else if (bandwidthKBps < 300) {
+          bwText.style.color = '#ff0'; // Yellow
+        } else {
+          bwText.style.color = '#f00'; // Red
+        }
+      }
       
       const bandwidthTimeDiff = (now - lastBandwidthUpdate) / 1000;
       if (bandwidthTimeDiff > 0) {
@@ -970,6 +984,7 @@ function insertDiacritic(char) {
 // Motor control
 let moving = false;
 let currentDirection = null;
+let moveInterval = null;
 
 async function mcmd(dir, speed) {
   const led = sid('mled');
@@ -1000,25 +1015,77 @@ function go(direction) {
   const speed = speedEl ? speedEl.value : 150;
   mcmd(direction, speed);
   log('Move ' + direction);
+  
+  // Clear any existing interval
+  if (moveInterval) clearInterval(moveInterval);
+  
+  // Set up periodic movement command to ensure motors keep moving
+  moveInterval = setInterval(() => {
+    if (moving && currentDirection === direction) {
+      const speedEl = sid('spd');
+      const speed = speedEl ? speedEl.value : 150;
+      mcmd(direction, speed);
+    }
+  }, 200); // Send command every 200ms to maintain movement
 }
 
 function stopM() {
   if (!moving) return;
   moving = false;
-  currentDirection = null;
+  if (currentDirection) currentDirection = null;
   const speedEl = sid('spd');
   const speed = speedEl ? speedEl.value : 150;
   mcmd('stop', speed);
+  
+  // Clear the movement interval
+  if (moveInterval) {
+    clearInterval(moveInterval);
+    moveInterval = null;
+  }
+  
   log('Stop');
 }
 
 function estop() {
   moving = false;
-  currentDirection = null;
+  if (currentDirection) currentDirection = null;
   const speedEl = sid('spd');
   const speed = speedEl ? speedEl.value : 150;
   mcmd('stop', speed);
+  
+  // Clear the movement interval
+  if (moveInterval) {
+    clearInterval(moveInterval);
+    moveInterval = null;
+  }
+  
   log('EMERGENCY STOP');
+}
+
+// Motor test function
+async function testMotors() {
+  log('Testing motors...');
+  const led = sid('mled');
+  if (led) led.className = 'led warn';
+  
+  try {
+    const response = await fetch('/motor/test', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'}
+    });
+    const result = await response.json();
+    
+    if (result.ok) {
+      log('Motor test completed successfully');
+      if (led) led.className = 'led ok';
+    } else {
+      log('Motor test failed: ' + result.msg);
+      if (led) led.className = 'led err';
+    }
+  } catch (e) {
+    log('Motor test error: ' + e.message);
+    if (led) led.className = 'led err';
+  }
 }
 
 // Camera functions
@@ -1035,9 +1102,10 @@ async function setRes(resolution) {
     console.log('[SetRes] Server response:', result);
     
     if (result.ok) {
-      // Update resolution display
+      // Update resolution display with the actual resolution from server
       const resDisplay = sid('resolution-display');
       if (resDisplay) {
+        // Use the resolution from server response, fallback to requested resolution
         const displayValue = result.resolution || resolution;
         resDisplay.textContent = displayValue;
         console.log('[SetRes] Resolution display updated to:', displayValue);
@@ -1142,6 +1210,16 @@ async function statusAll() {
 }
 
 // Recording functions
+let isRecording = false;
+
+async function toggleRecording() {
+  if (isRecording) {
+    await recStop();
+  } else {
+    await recStart();
+  }
+}
+
 async function recStart() {
   log('Recording start...');
   try {
@@ -1149,6 +1227,14 @@ async function recStart() {
       await toggleMicrophone();
       log('Audio stream paused for recording');
       await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    isRecording = true;
+    const recordBtn = sid('recordBtn');
+    if (recordBtn) {
+      recordBtn.textContent = 'Stop Rec';
+      recordBtn.style.backgroundColor = '#ff4444';
+      recordBtn.style.color = '#fff';
     }
     
     recordingActive = true;
@@ -1168,10 +1254,23 @@ async function recStart() {
       log(msg);
     } else {
       log('Rec error: ' + result.msg);
+      isRecording = false;
+      if (recordBtn) {
+        recordBtn.textContent = 'Start Rec';
+        recordBtn.style.backgroundColor = '';
+        recordBtn.style.color = '';
+      }
     }
   } catch (e) {
     log('Recording start error: ' + e.message);
     recordingActive = false;
+    isRecording = false;
+    const recordBtn = sid('recordBtn');
+    if (recordBtn) {
+      recordBtn.textContent = 'Start Rec';
+      recordBtn.style.backgroundColor = '';
+      recordBtn.style.color = '';
+    }
   }
 }
 
@@ -1180,6 +1279,14 @@ async function recStop() {
   try {
     const response = await fetch('/stop_recording', {method: 'POST'});
     const result = await response.json();
+    
+    isRecording = false;
+    const recordBtn = sid('recordBtn');
+    if (recordBtn) {
+      recordBtn.textContent = 'Start Rec';
+      recordBtn.style.backgroundColor = '';
+      recordBtn.style.color = '';
+    }
     
     recordingActive = false;
     
@@ -1192,6 +1299,78 @@ async function recStop() {
     log(result.ok ? ('Stopped. Last -> ' + (result.file || 'n/a')) : ('Stop error: ' + result.msg));
   } catch (e) {
     log('Recording stop error: ' + e.message);
+  }
+}
+
+// Snapshot function
+async function snap() {
+  log('Taking snapshot...');
+  try {
+    const response = await fetch('/snapshot', {method: 'POST'});
+    const result = await response.json();
+    
+    if (result.ok) {
+      log('Snapshot saved: ' + result.filename);
+    } else {
+      log('Snapshot error: ' + result.msg);
+    }
+  } catch (e) {
+    log('Snapshot error: ' + e.message);
+  }
+}
+
+// Battery monitoring
+async function updateBattery() {
+  try {
+    const response = await fetch('/battery');
+    const battery = await response.json();
+    
+    // Update battery percentage display in video info bar
+    const batteryDisplay = sid('battery-display');
+    if (batteryDisplay) {
+      batteryDisplay.textContent = battery.percentage.toFixed(0) + '%';
+      // Add color coding based on battery level
+      if (battery.percentage > 50) {
+        batteryDisplay.style.color = '#0f0'; // Green
+      } else if (battery.percentage > 20) {
+        batteryDisplay.style.color = '#ff0'; // Yellow
+      } else {
+        batteryDisplay.style.color = '#f00'; // Red
+      }
+    }
+    
+    // Update voltage display in video info bar
+    const voltageDisplay = sid('voltage-display');
+    if (voltageDisplay && battery.voltage) {
+      voltageDisplay.textContent = '(' + battery.voltage.toFixed(1) + 'V)';
+      // Add color coding based on voltage level
+      if (battery.voltage > 11.5) {
+        voltageDisplay.style.color = '#0f0'; // Green
+      } else if (battery.voltage > 10.5) {
+        voltageDisplay.style.color = '#ff0'; // Yellow
+      } else {
+        voltageDisplay.style.color = '#f00'; // Red
+      }
+    }
+    
+    // Update battery bar (if it exists in motor panel - for backward compatibility)
+    const fill = sid('batf');
+    const percentage = sid('batp');
+    
+    if (fill && percentage) {
+      fill.style.width = battery.percentage + '%';
+      percentage.textContent = battery.percentage.toFixed(0) + '%';
+      
+      if (battery.percentage > 50) {
+        fill.style.background = '#0f0';
+      } else if (battery.percentage > 20) {
+        fill.style.background = '#ff0';
+      } else {
+        fill.style.background = '#f00';
+      }
+    }
+  } catch (e) {
+    console.error('Battery update error:', e);
   }
 }
 
@@ -1256,6 +1435,9 @@ function updateMicStatus(status) {
   }
 }
 
+
+
+// Microphone test functions
 async function testMic() {
   log('Testing microphone...');
   try {
@@ -1369,31 +1551,6 @@ async function rebootSystem() {
   }
 }
 
-// Battery monitoring
-async function updateBattery() {
-  try {
-    const response = await fetch('/battery');
-    const battery = await response.json();
-    const fill = sid('batf');
-    const percentage = sid('batp');
-    
-    if (fill && percentage) {
-      fill.style.width = battery.percentage + '%';
-      percentage.textContent = battery.percentage.toFixed(0) + '%';
-      
-      if (battery.percentage > 50) {
-        fill.style.background = '#0f0';
-      } else if (battery.percentage > 20) {
-        fill.style.background = '#ff0';
-      } else {
-        fill.style.background = '#f00';
-      }
-    }
-  } catch (e) {
-    console.error('Battery update error:', e);
-  }
-}
-
 // Keyboard controls
 const keyState = {};
 
@@ -1433,7 +1590,7 @@ function init() {
   // Set initial state
   setLang('en');
   updateBattery();
-  setInterval(updateBattery, 5000);
+  setInterval(updateBattery, 60000); // Update battery every minute
   
   // Get initial system status
   statusAll();

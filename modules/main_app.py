@@ -24,6 +24,11 @@ parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
+# Battery caching variables
+_battery_cache = None
+_last_battery_update = 0
+_battery_update_interval = 60  # 60 seconds
+
 # Import all modules with error handling
 print("[MainApp] Loading Avatar Tank modules...")
 
@@ -69,6 +74,7 @@ except ImportError as e:
         def move(self, l, r): return {"ok": False, "msg": "Motor module not loaded"}
         def stop(self): return {"ok": False, "msg": "Motor module not loaded"}
         def get_battery(self): return {"voltage": 12.0, "percentage": 75}
+        def reconnect(self): return False
     motors = DummyMotors()
     def get_motor_status(): return {"connected": False}
 
@@ -122,23 +128,6 @@ except ImportError as e:
         words = []
     _predict = DummyPredict()
 
-try:
-    from modules.audio_streamer import (handle_start_simple_audio, handle_stop_simple_audio, 
-                                       handle_test_audio_tone, handle_disconnect as audio_disconnect,
-                                       get_audio_streaming_status)
-    print("[MainApp] ✓ Audio streamer loaded")
-    audio_streamer_available = True
-    print(f"[MainApp] Audio streamer available: {audio_streamer_available}")
-except ImportError as e:
-    print(f"[MainApp] ✗ Audio streamer failed: {e}")
-    audio_streamer_available = False
-    def handle_start_simple_audio(): pass
-    def handle_stop_simple_audio(): pass
-    def handle_test_audio_tone(): pass
-    def audio_disconnect(): pass
-    def get_audio_streaming_status(): return {"active": False}
-
-
 # Create Flask app with proper configuration
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload
@@ -153,6 +142,34 @@ socketio = SocketIO(
     max_http_buffer_size=1000000
 )
 
+# NOW initialize the audio streamer AFTER socketio is created
+try:
+    from modules.audio_streamer import (
+        handle_start_simple_audio, handle_stop_simple_audio, 
+        handle_test_audio_tone, handle_disconnect as audio_disconnect,
+        get_audio_streaming_status, set_socketio_instance
+    )
+    # Now socketio exists, so this will work
+    set_socketio_instance(socketio)
+    print("[MainApp] ✓ Audio streamer loaded")
+    audio_streamer_available = True
+    
+except ImportError as e:
+    print(f"[MainApp] ✗ Audio streamer failed: {e}")
+    audio_streamer_available = False
+    
+    # Create dummy functions
+    def handle_start_simple_audio(): 
+        return {"ok": False, "msg": "Audio streamer not available"}
+    def handle_stop_simple_audio(): 
+        return {"ok": False, "msg": "Audio streamer not available"}
+    def handle_test_audio_tone(): 
+        return {"ok": False, "msg": "Audio streamer not available"}
+    def audio_disconnect(): 
+        pass
+    def get_audio_streaming_status(): 
+        return {"active": False, "msg": "Audio streamer not available"}
+
 # Ensure required directories exist
 Path("snapshots").mkdir(exist_ok=True)
 Path("recordings").mkdir(exist_ok=True)
@@ -166,7 +183,6 @@ app_state = {
     'audio_streaming_clients': set()
 }
 
-
 # ============== WebSocket Event Handlers ==============
 @socketio.on('connect')
 def handle_connect():
@@ -174,7 +190,7 @@ def handle_connect():
     print(f"[WebSocket] Client connected: {request.sid} (total: {app_state['clients_connected']})")
 
 @socketio.on('disconnect')
-def handle_disconnect():
+def handle_disconnect_wrapper():
     app_state['clients_connected'] -= 1
     
     # Clean up audio streaming for this client
@@ -187,28 +203,37 @@ def handle_disconnect():
 
 @socketio.on('start_simple_audio')
 def handle_start_simple_audio_event():
-    print("[WebSocket] start_simple_audio event received")
+    print(f"[WebSocket] start_simple_audio event received from {request.sid}")
     if audio_streamer_available:
         app_state['audio_streaming_clients'].add(request.sid)
-        handle_start_simple_audio()
+        result = handle_start_simple_audio()
+        print(f"[WebSocket] Audio start result: {result}")
+        return result
     else:
         socketio.emit('audio_status', {'status': 'error', 'message': 'Audio streamer not available'})
+        return {"ok": False, "msg": "Audio streamer not available"}
 
 @socketio.on('stop_simple_audio')
 def handle_stop_simple_audio_event():
-    print("[WebSocket] stop_simple_audio event received")
+    print(f"[WebSocket] stop_simple_audio event received from {request.sid}")
     if audio_streamer_available:
         app_state['audio_streaming_clients'].discard(request.sid)
-        handle_stop_simple_audio()
+        result = handle_stop_simple_audio()
+        print(f"[WebSocket] Audio stop result: {result}")
+        return result
     else:
         socketio.emit('audio_status', {'status': 'error', 'message': 'Audio streamer not available'})
+        return {"ok": False, "msg": "Audio streamer not available"}
 
 @socketio.on('test_audio_tone')
 def handle_test_audio_tone_event():
+    print("[WebSocket] test_audio_tone event received")
     if audio_streamer_available:
-        handle_test_audio_tone()
+        result = handle_test_audio_tone()
+        return result
     else:
         socketio.emit('audio_status', {'status': 'error', 'message': 'Audio streamer not available'})
+        return {"ok": False, "msg": "Audio streamer not available"}
 
 
 # ============== HTTP Routes ==============
@@ -256,16 +281,25 @@ def index():
 # Video streaming
 @app.route('/video')
 def video():
-    """Video stream endpoint"""
+    """Video stream endpoint with timeout"""
     try:
-        return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+        # Add a timeout wrapper for the generator
+        def timeout_wrapper():
+            start_time = time.time()
+            max_duration = 3600  # 1 hour max stream
+            
+            for frame in generate_frames():
+                if time.time() - start_time > max_duration:
+                    print("[MainApp] Video stream timeout reached")
+                    break
+                yield frame
+        
+        return Response(timeout_wrapper(), mimetype='multipart/x-mixed-replace; boundary=frame')
     except Exception as e:
         print(f"[MainApp] Video stream error: {e}")
-        # Return a simple error image
+        # Return a simple error response
         def error_frame():
-            while True:
-                yield b'--frame\r\nContent-Type: text/plain\r\n\r\nVideo Error\r\n'
-                time.sleep(1)
+            yield b'--frame\r\nContent-Type: text/plain\r\n\r\nVideo Stream Error\r\n'
         return Response(error_frame(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # Camera control
@@ -340,13 +374,54 @@ def motor_reconnect():
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)})
 
+@app.route('/motor/test', methods=['POST'])
+def motor_test():
+    """Test motor functionality"""
+    try:
+        # Test forward movement
+        forward_result = motors.move(100, 100)
+        time.sleep(1)
+        
+        # Stop motors
+        stop_result = motors.stop()
+        time.sleep(0.5)
+        
+        # Test backward movement
+        backward_result = motors.move(-100, -100)
+        time.sleep(1)
+        
+        # Stop motors
+        stop_result2 = motors.stop()
+        
+        return jsonify({
+            "ok": True, 
+            "msg": "Motor test completed",
+            "forward": forward_result,
+            "backward": backward_result,
+            "stops": [stop_result, stop_result2]
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)})
+
 @app.route('/battery')
 def battery_status():
     """Get battery status"""
+    global _battery_cache, _last_battery_update, _battery_update_interval
     try:
-        return jsonify(motors.get_battery())
+        # Use cached battery status to ensure consistent update interval
+        current_time = time.time()
+        if _battery_cache is None or current_time - _last_battery_update > _battery_update_interval:
+            _battery_cache = motors.get_battery()
+            _last_battery_update = current_time
+        
+        return jsonify(_battery_cache)
     except Exception as e:
-        return jsonify({"voltage": 12.0, "percentage": 75, "error": str(e)})
+        # Even on error, use cached battery status if available
+        return jsonify({
+            "ok": False, 
+            "msg": str(e),
+            "battery": _battery_cache or {"voltage": 12.0, "percentage": 75}
+        })
 
 # Text-to-Speech
 @app.route('/speak', methods=['POST'])
@@ -453,8 +528,8 @@ def audio_devices():
     """Get available audio devices"""
     try:
         return jsonify({
-            "mic_detected": getattr(device_detector, 'audio_input', []),
-            "spk_detected": getattr(device_detector, 'audio_output', []),
+            "mic_detected": getattr(device_detector, 'audio_input', []) if 'device_detector' in globals() else [],
+            "spk_detected": getattr(device_detector, 'audio_output', []) if 'device_detector' in globals() else [],
             "MIC_PLUG": MIC_PLUG,
             "SPK_PLUG": SPK_PLUG,
             "override_hint": "Set AV_MIC and AV_SPK environment variables to override"
@@ -655,17 +730,24 @@ def predict_learn():
 @app.route('/system_status')
 def system_status():
     """Get comprehensive system status"""
+    global _battery_cache, _last_battery_update, _battery_update_interval
     try:
-        camera_status = get_camera_status()
-        motor_status = get_motor_status()
+        camera_status_data = get_camera_status()
+        motor_status_data = get_motor_status()
         tts_status_data = tts.status()
         
+        # Use cached battery status to prevent frequent updates
+        current_time = time.time()
+        if _battery_cache is None or current_time - _last_battery_update > _battery_update_interval:
+            _battery_cache = motors.get_battery()
+            _last_battery_update = current_time
+        
         return jsonify({
-            "camera": camera_status,
-            "motors": motor_status,
+            "camera": camera_status_data,
+            "motors": motor_status_data,
             "tts": tts_status_data,
             "audio": {"mic": MIC_PLUG, "speaker": SPK_PLUG},
-            "battery": motors.get_battery(),
+            "battery": _battery_cache,
             "app_state": {
                 "uptime": time.time() - app_state['startup_time'],
                 "clients_connected": app_state['clients_connected'],
@@ -674,7 +756,12 @@ def system_status():
             }
         })
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)})
+        # Even on error, use cached battery status if available
+        return jsonify({
+            "ok": False, 
+            "msg": str(e),
+            "battery": _battery_cache or {"voltage": 12.0, "percentage": 75}
+        })
 
 @app.route('/system/reboot', methods=['POST'])
 def system_reboot():
@@ -720,8 +807,10 @@ def print_startup_info():
     print(f"TTS Status: {tts.status()}")
     print(f"Camera Status: {get_camera_status()}")
     print(f"Motor Status: {get_motor_status()}")
+    print(f"Audio Streamer: {'Available' if audio_streamer_available else 'Not Available'}")
     print("="*60)
     print("Web interface available at: http://localhost:5000")
+    print("Battery readings will be updated once every minute")
     print("="*60)
 
 def cleanup_on_shutdown():
@@ -743,6 +832,26 @@ def cleanup_on_shutdown():
     
     print("[MainApp] Cleanup complete")
 
+# Network monitoring function
+def monitor_network_status():
+    """Monitor network status and stop motors if network fails"""
+    global motors
+    while True:
+        try:
+            # Check if we can reach a reliable external service
+            import socket
+            socket.create_connection(("8.8.8.8", 53), timeout=3)
+            # Network is up, continue normal operation
+            time.sleep(30)  # Check every 30 seconds
+        except OSError:
+            # Network is down, stop motors for safety
+            print("[MainApp] Network failure detected, stopping motors")
+            try:
+                motors.stop()
+            except:
+                pass
+            time.sleep(30)  # Check every 30 seconds
+
 # Register cleanup handler
 import atexit
 atexit.register(cleanup_on_shutdown)
@@ -753,6 +862,11 @@ atexit.register(cleanup_on_shutdown)
 if __name__ == '__main__':
     try:
         print_startup_info()
+        
+        # Start network monitoring thread
+        network_monitor_thread = threading.Thread(target=monitor_network_status, daemon=True)
+        network_monitor_thread.start()
+        print("[MainApp] Network monitoring started")
         
         # Start SocketIO server with production settings
         print("[MainApp] Starting SocketIO server...")

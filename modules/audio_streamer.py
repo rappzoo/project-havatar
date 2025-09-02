@@ -30,13 +30,8 @@ except ImportError as e:
     MIC_PLUG = 'default'
 
 
-# Import socketio from main_app to avoid context issues
-try:
-    from modules.main_app import socketio
-    print("[AudioStreamer] Successfully imported socketio from main_app")
-except ImportError as e:
-    socketio = None
-    print(f"[AudioStreamer] Warning: Could not import socketio from main_app: {e}")
+# Global variable for socketio - will be set by main_app
+socketio = None
 
 
 class AudioStreamer:
@@ -111,10 +106,12 @@ class AudioStreamer:
                 print(f"[AudioStreamer] Warning: Microphone test failed for {MIC_PLUG}")
                 # Continue anyway - might still work
             
+            # Improved FFmpeg command with better audio quality settings
             cmd = [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
                 "-f", "alsa", "-i", MIC_PLUG,
-                "-acodec", "pcm_s16le", "-ar", "22050", "-ac", "1",
+                "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1",  # Increased sample rate to 44.1kHz
+                "-af", "highpass=f=100,lowpass=f=7000",  # Add filters to reduce noise
                 "-f", "s16le", "-"  # Raw PCM output to stdout
             ]
             
@@ -152,13 +149,14 @@ class AudioStreamer:
             test_cmd = ["arecord", "-D", MIC_PLUG, "-f", "cd", "-d", "1", "-q", "/dev/null"]
             result = subprocess.run(test_cmd, capture_output=True, timeout=2)
             return result.returncode == 0
-        except:
+        except Exception as e:
+            print(f"[AudioStreamer] Microphone test failed: {e}")
             return False
     
     def _audio_worker(self):
         """Worker thread that reads audio data and sends via WebSocket"""
         try:
-            chunk_size = 2048
+            chunk_size = 8192  # Increased chunk size for smoother streaming
             chunk_count = 0
             empty_chunk_count = 0
             last_stats_time = time.time()
@@ -184,7 +182,7 @@ class AudioStreamer:
                         if empty_chunk_count > 50:  # Too many empty reads
                             print("[AudioStreamer] Too many empty reads, stopping")
                             break
-                        time.sleep(0.001)  # Brief pause for empty reads
+                        time.sleep(0.01)  # Increased pause for empty reads
                         continue
                     
                     empty_chunk_count = 0  # Reset on successful read
@@ -199,11 +197,15 @@ class AudioStreamer:
                     
                     # Send to all connected clients
                     if socketio:
-                        for client_id in self.client_sessions:
-                            socketio.emit('audio_data', {
-                                'data': chunk_b64,
-                                'format': 'pcm_s16le_22050_mono'
-                            }, room=client_id)
+                        for client_id in list(self.client_sessions):  # Use list copy to avoid modification during iteration
+                            try:
+                                socketio.emit('audio_data', {
+                                    'data': chunk_b64,
+                                    'format': 'pcm_s16le_44100_mono'  # Updated format
+                                }, room=client_id)
+                            except Exception as e:
+                                print(f"[AudioStreamer] Error sending to client {client_id}: {e}")
+                                self.client_sessions.discard(client_id)  # Remove problematic client
                     
                     # Periodic stats logging
                     current_time = time.time()
@@ -215,9 +217,9 @@ class AudioStreamer:
                               f"{avg_chunks_per_sec:.1f} chunks/sec")
                         last_stats_time = current_time
                     
-                    # Brief pause to prevent overwhelming the WebSocket
-                    if chunk_count % 10 == 0:
-                        time.sleep(0.001)  # 1ms pause every 10 chunks
+                    # Adjusted pause to prevent overwhelming the WebSocket while maintaining smooth streaming
+                    if chunk_count % 3 == 0:  # Reduced frequency of pauses
+                        time.sleep(0.01)  # Increased pause duration
                         
                 except Exception as e:
                     self.stats['errors'] += 1
@@ -399,5 +401,10 @@ def get_audio_streaming_status():
 def is_audio_streaming():
     """Check if audio streaming is active"""
     return audio_streamer.active
+
+def set_socketio_instance(sockio):
+    """Set the socketio instance - called by main_app"""
+    global socketio
+    socketio = sockio
 
 print("[AudioStreamer] Module initialized")

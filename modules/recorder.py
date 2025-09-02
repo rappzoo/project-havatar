@@ -29,8 +29,8 @@ except ImportError as e:
     print(f"[Recorder] Warning: Could not import modules ({e}), using fallbacks")
     MIC_PLUG = 'default'
     camera_settings = {
-        "480p": {"width": 640, "height": 480, "fps": 30},
-        "720p": {"width": 1280, "height": 720, "fps": 15},
+        "480p": {"width": 640, "height": 480, "fps": 10},
+        "720p": {"width": 1280, "height": 720, "fps": 10},
         "1080p": {"width": 1920, "height": 1080, "fps": 10}
     }
     current_resolution = "720p"
@@ -65,23 +65,24 @@ class RecordingManager:
             'errors': 0
         }
         
-        # Test audio device availability
-        self._test_audio_setup()
+        # Don't test audio device during initialization to prevent startup issues
+        # The test will be done when actually starting a recording
+        print("[Recorder] Initialized without audio device testing")
     
     def _test_audio_setup(self):
         """Test audio device availability and compatibility"""
         print(f"[Recorder] Testing audio device: {MIC_PLUG}")
         
         try:
-            # Quick test with arecord
+            # Quick test with arecord - but be more careful about it
             test_cmd = ["arecord", "-D", MIC_PLUG, "-f", "cd", "-d", "1", "-q"]
-            result = subprocess.run(test_cmd, capture_output=True, timeout=2)
+            result = subprocess.run(test_cmd, capture_output=True, timeout=3)
             
             if result.returncode == 0:
                 print("[Recorder] Audio device test successful")
                 return True
             else:
-                print(f"[Recorder] Audio device test failed: {result.stderr.decode()}")
+                print(f"[Recorder] Audio device test failed: {result.stderr.decode()[:100]}...")
                 return False
                 
         except subprocess.TimeoutExpired:

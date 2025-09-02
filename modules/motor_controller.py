@@ -147,6 +147,7 @@ class MotorController:
     def _test_communication(self) -> bool:
         """Test communication with the motor controller"""
         try:
+            print(f"[Motor] Testing communication with motor controller on {self.port}")
             # Send a status command to test communication
             self.ser.write(b'STATUS\n')
             time.sleep(0.3)
@@ -171,11 +172,14 @@ class MotorController:
                         line = line.strip()
                         if line.startswith('{') and line.endswith('}'):
                             data = json.loads(line)
+                            print(f"[Motor] Received JSON data: {data}")
                             if 'voltage' in data:
                                 self.battery_voltage = float(data['voltage'])
                                 self._update_battery_percentage()
+                                print(f"[Motor] Battery voltage: {self.battery_voltage}V, {self.battery_percentage}%")
                             break
-                except:
+                except Exception as e:
+                    print(f"[Motor] Error parsing battery info: {e}")
                     pass  # Not critical if battery parsing fails
                 
                 return True
@@ -196,13 +200,16 @@ class MotorController:
     
     def send_command(self, cmd: str) -> Dict[str, Any]:
         """Send command to motor controller with enhanced error handling"""
+        print(f"[Motor] Sending command: {cmd}")
         with self.lock:
             return self._send_command_internal(cmd)
     
     def _send_command_internal(self, cmd: str) -> Dict[str, Any]:
         """Internal command sending method (assumes lock is held)"""
+        print(f"[Motor] Internal command processing: {cmd}")
         # Check if we're connected
         if not self.ser or not self.connected:
+            print("[Motor] Not connected, attempting to reconnect...")
             if not self._connect_internal():
                 return {"ok": False, "msg": "no motor connection", "error": "disconnected"}
         
@@ -210,11 +217,13 @@ class MotorController:
         current_time = time.time()
         time_since_last = current_time - self.last_command_time
         if time_since_last < 0.05:  # Minimum 50ms between commands
+            print(f"[Motor] Rate limiting, sleeping for {0.05 - time_since_last:.3f}s")
             time.sleep(0.05 - time_since_last)
         
         try:
             # Send command
             command_bytes = (cmd + '\n').encode('utf-8')
+            print(f"[Motor] Writing command bytes: {command_bytes}")
             self.ser.write(command_bytes)
             self.ser.flush()  # Ensure command is sent
             
@@ -228,6 +237,7 @@ class MotorController:
                 if self.ser.in_waiting:
                     data = self.ser.read_all().decode('utf-8', 'ignore')
                     response += data
+                    print(f"[Motor] Received data: {data}")
                     
                     # Look for JSON responses
                     for line in response.split('\n'):
@@ -235,6 +245,7 @@ class MotorController:
                         if line.startswith('{') and line.endswith('}'):
                             try:
                                 json_response = json.loads(line)
+                                print(f"[Motor] Parsed JSON response: {json_response}")
                                 
                                 # Update battery info if present
                                 if 'voltage' in json_response:
@@ -242,19 +253,25 @@ class MotorController:
                                     self._update_battery_percentage()
                                 
                                 return json_response
-                            except json.JSONDecodeError:
+                            except json.JSONDecodeError as e:
+                                print(f"[Motor] JSON decode error: {e}")
                                 continue
                 
                 time.sleep(0.01)
             
             # If we get here, we got a response but no valid JSON
             if response.strip():
+                print(f"[Motor] Non-JSON response: {response.strip()}")
                 return {"ok": True, "msg": "command sent", "raw": response.strip()}
             else:
-                return {"ok": True, "msg": "command sent (no response)"}
+                print("[Motor] No response received")
+                # Network failure - stop motors
+                self._stop_motors_on_failure()
+                return {"ok": False, "msg": "no response from motor controller", "error": "network"}
                 
         except serial.SerialException as e:
             # Serial communication error - mark as disconnected
+            print(f"[Motor] Serial exception: {e}")
             self.connected = False
             self.last_error = str(e)
             try:
@@ -263,11 +280,26 @@ class MotorController:
                 pass
             self.ser = None
             
+            # Network failure - stop motors
+            self._stop_motors_on_failure()
             return {"ok": False, "msg": f"serial error: {e}", "error": "serial"}
             
         except Exception as e:
+            print(f"[Motor] General exception: {e}")
             self.last_error = str(e)
+            # Network failure - stop motors
+            self._stop_motors_on_failure()
             return {"ok": False, "msg": f"command error: {e}", "error": "general"}
+    
+    def _stop_motors_on_failure(self):
+        """Stop motors when network failure is detected"""
+        print("[Motor] Network failure detected, stopping motors")
+        try:
+            if self.ser:
+                self.ser.write(b'STOP\n')
+                self.ser.flush()
+        except:
+            pass
     
     def move(self, left_speed: int, right_speed: int) -> Dict[str, Any]:
         """Move the robot with specified left and right motor speeds"""
@@ -276,11 +308,41 @@ class MotorController:
         right_speed = max(-255, min(255, int(right_speed)))
         
         command = f"PWM {left_speed} {right_speed}"
+        print(f"[Motor] Sending move command: {command}")
         return self.send_command(command)
     
     def stop(self) -> Dict[str, Any]:
         """Stop all motors immediately"""
+        print("[Motor] Sending STOP command")
         return self.send_command("STOP")
+    
+    def test_motors(self) -> Dict[str, Any]:
+        """Test motor functionality"""
+        try:
+            # Test forward movement
+            forward_result = self.move(100, 100)
+            time.sleep(1)
+            
+            # Stop motors
+            stop_result = self.stop()
+            time.sleep(0.5)
+            
+            # Test backward movement
+            backward_result = self.move(-100, -100)
+            time.sleep(1)
+            
+            # Stop motors
+            stop_result2 = self.stop()
+            
+            return {
+                "ok": True,
+                "msg": "Motor test completed",
+                "forward": forward_result,
+                "backward": backward_result,
+                "stops": [stop_result, stop_result2]
+            }
+        except Exception as e:
+            return {"ok": False, "msg": str(e)}
     
     def get_battery(self) -> Dict[str, Any]:
         """Get battery status"""
