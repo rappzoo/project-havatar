@@ -11,11 +11,37 @@ import subprocess
 from pathlib import Path
 
 
+def load_ascii_banner():
+    """Load ASCII banner from file"""
+    banner_file = Path('havatar_banner.art')
+    if banner_file.exists():
+        try:
+            with open(banner_file, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            print(f"[Warning] Could not load banner file: {e}")
+    
+    # Fallback banner if file doesn't exist
+    return """
+  ██╗  ██╗ █████╗ ██╗   ██╗ █████╗ ████████╗ █████╗ ██████╗ 
+ ██║  ██║██╔══██╗██║   ██║██╔══██╗╚══██╔══╝██╔══██╗██╔══██╗
+ ███████║███████║██║   ██║███████║   ██║   ███████║██████╔╝
+ ██╔══██║██╔══██║╚██╗ ██╔╝██╔══██║   ██║   ██╔══██║██╔══██╗
+ ██║  ██║██║  ██║ ╚████╔╝ ██║  ██║   ██║   ██║  ██║██║  ██║
+ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝
+                                                            
+        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░        
+        ░░   REMOTE PRESENCE ROBOT - RASPBERRY PI   ░░        
+        ░░        Accessibility & Independence      ░░        
+        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░        
+"""
+
+
 def print_header():
-    """Print startup header"""
+    """Print startup header with ASCII banner"""
+    print("\n")
+    print(load_ascii_banner())
     print("\n" + "="*70)
-    print("    AVATAR TANK CONTROL SYSTEM - MODULAR VERSION")
-    print("="*70)
     print(f"Python version: {sys.version}")
     print(f"Working directory: {os.getcwd()}")
     print(f"Script location: {os.path.abspath(__file__)}")
@@ -273,10 +299,19 @@ def main():
     # Permissions and environment info
     check_permissions()
     show_environment_info()
-    
-    print("\n[Info] Web interface will be available at:")
-    print("[Info]   Local:    http://localhost:5000")
-    print("[Info]   Network:  http://[your-pi-ip]:5000")
+    print()
+    print(load_ascii_banner())
+
+    # Show network information in a compatible format
+    # print("\n" + "="*70)
+    print(" "*25 + "WEB INTERFACE READY" + " "*25)
+    print("="*70)
+    print()
+    print("  >> Local Access:    http://localhost:5000")
+    print("  >> Network Access:  http://[your-pi-ip]:5000")
+    print()
+    print("  TIP: Find your Pi's IP with 'hostname -I'")
+    print("="*70)
     
     # Final confirmation
     try:

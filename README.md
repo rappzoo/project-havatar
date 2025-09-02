@@ -65,36 +65,60 @@ A remotely controlled, Raspberry Pi 5 + ESP32-powered tracked robot designed for
 
 ## 🏗️ Software Architecture
 
-### **Raspberry Pi 5 Services**
+### **Modular Design (NEW!)**
 
-#### **Flask Web Server** (`avatar_tank_enhanced.py`)
-- Main web UI and control interface
-- RESTful API for all robot functions
-- Serial communication with ESP32
-- Device auto-detection and configuration
+Proiectul a fost complet refactorizat într-o arhitectură modulară pentru o mai bună mentenabilitate și scalabilitate:
 
-#### **OpenCV Video Streaming**
-- Direct V4L2 camera integration
-- Multiple resolution support (320p-720p)
-- MJPEG format optimization
-- Auto-detection of camera capabilities
+#### **Core Modules**
+- **`modules/main_app.py`** - Aplicația principală Flask care coordonează toate modulele
+- **`modules/device_detector.py`** - Detectarea automată a camerelor, dispozitivelor audio și controllerelor motor
+- **`modules/camera.py`** - Inițializarea camerelor, configurarea și generarea frame-urilor
+- **`modules/motor_controller.py`** - Controlul motoarelor și comunicația cu ESP32
+- **`modules/tts.py`** - Funcționalitatea Text-to-Speech folosind Piper sau motoare fallback
+- **`modules/recorder.py`** - Înregistrarea video și audio
+- **`modules/audio_utils.py`** - Utilitare audio pentru controlul volumului și managementul dispozitivelor
+- **`modules/predictor.py`** - Sistemul de predicție și sugerare de cuvinte
+- **`modules/audio_streamer.py`** - Funcționalitatea de streaming audio prin WebSocket
 
-#### **FFmpeg**
-- Synchronized audio+video recording
-- Live microphone streaming
-- Audio processing and encoding
+#### **Launcher Enhanced** (`avatar_tank_enhanced.py`)
+- Punct de intrare cu verificări complete ale sistemului
+- Testarea modulelor și diagnostice
+- Verificarea permisiunilor și grupurilor utilizator
+- Setup automat al mediului Python
+- Monitoring în timp real al stării sistemului
 
-#### **ZeroTier (External Configuration)**
-- Secure P2P networking (configured externally)
-- Remote access from anywhere
-- Network-level VPN solution
+#### **Raspberry Pi 5 Services**
+
+##### **Flask Web Server Modular**
+- Interfața web principală și controlul
+- API RESTful pentru toate funcțiile robotului
+- Comunicarea serială cu ESP32
+- Auto-detectarea și configurarea dispozitivelor
+- Gestionarea robustă a erorilor cu module dummy pentru fallback
+
+##### **OpenCV Video Streaming**
+- Integrarea directă V4L2 pentru cameră
+- Suport pentru multiple rezoluții (320p-720p)
+- Optimizarea formatului MJPEG
+- Auto-detectarea capabilităților camerei
+
+##### **FFmpeg & Audio Processing**
+- Înregistrarea sincronizată audio+video
+- Streaming live al microfonului
+- Procesarea și encodarea audio
+- Suport pentru multiple moduri de streaming audio
+
+##### **ZeroTier (External Configuration)**
+- Networking P2P securizat (configurat extern)
+- Acces remote de oriunde
+- Soluție VPN la nivel de rețea
 
 ### **ESP32 Firmware**
-- DC motor control with encoder feedback
-- Battery monitoring via INA219
-- Serial communication with Raspberry Pi
-- Real-time status reporting
-- Expandable for additional sensors
+- Controlul motoarelor DC cu feedback de la encodere
+- Monitorizarea bateriei prin INA219
+- Comunicarea serială cu Raspberry Pi
+- Raportarea statusului în timp real
+- Extensibil pentru senzori suplimentari
 
 ## 🚀 Quick Start
 
@@ -135,7 +159,11 @@ A remotely controlled, Raspberry Pi 5 + ESP32-powered tracked robot designed for
 
 5. **Run the application**
    ```bash
+   # Versiunea modulară (recomandată)
    python avatar_tank_enhanced.py
+   
+   # Sau direct modulul principal
+   python modules/main_app.py
    ```
 
 6. **Access the web interface**
@@ -174,44 +202,73 @@ The system auto-detects devices on startup and saves configuration to `avatar_ta
 
 ```
 project-havatar/
-├── avatar_tank_enhanced.py     # Main Flask application
+├── avatar_tank_enhanced.py     # Enhanced launcher with system checks
 ├── avatar_tank_config.json     # Auto-generated device configuration
-├── dicts/                      # TTS language dictionaries
+├── modules/                    # Modular architecture (NEW!)
+│   ├── __init__.py
+│   ├── main_app.py            # Main Flask application coordinator
+│   ├── device_detector.py     # Auto-detection of hardware devices
+│   ├── camera.py              # Camera management and streaming
+│   ├── motor_controller.py    # ESP32 communication and motor control
+│   ├── tts.py                 # Text-to-Speech with Piper support
+│   ├── recorder.py            # Video/audio recording functionality
+│   ├── audio_utils.py         # Audio device management utilities
+│   ├── predictor.py           # Word prediction and text suggestions
+│   └── audio_streamer.py      # WebSocket audio streaming
+├── static/                    # Web interface files
+│   ├── index.html             # Updated web UI
+│   └── predict.js             # JavaScript for predictions
+├── dicts/                     # TTS language dictionaries
 │   ├── common.txt
 │   ├── en.txt
 │   └── ro.txt
-├── docs/                       # Documentation
-├── snapshots/                  # Captured images
-├── recordings/                 # Video recordings
-└── sounds/                     # Audio files
+├── docs/                      # Enhanced documentation
+│   ├── fluxuri.md             # Communication flows documentation
+│   └── propunere.md           # Server-centralized architecture proposal
+├── esp_firmware/              # ESP32 firmware
+│   └── espfirmware.ino        # Combined motor + battery monitoring
+├── backup/                    # Backup of previous versions
+├── snapshots/                 # Captured images
+├── recordings/                # Video recordings
+├── sounds/                    # Audio files
+├── MODULAR_REFACTOR_SUMMARY.md # Refactoring documentation
+├── MODULES_README.md          # Module usage guide
+├── module_examples.py         # Examples of module usage
+└── requirements.txt           # Python dependencies
 ```
 
 ## 🔧 Development Status
 
 ### **✅ Working Features**
-- [x] Tank movement control (hold-to-move)
-- [x] Live video streaming (OpenCV/V4L2)
-- [x] Real-time audio streaming (WebRTC + WebSocket fallback)
-- [x] Battery monitoring
-- [x] Snapshot and video recording
-- [x] Text-to-Speech output
-- [x] Remote access (via external ZeroTier configuration)
-- [x] Device auto-detection
-- [x] Web UI with responsive design
+- [x] **Modular Architecture** - Completely refactored for maintainability
+- [x] **Enhanced System Launcher** - Comprehensive system checks and diagnostics
+- [x] **Tank movement control** (hold-to-move)
+- [x] **Live video streaming** (OpenCV/V4L2)
+- [x] **Multi-mode audio streaming** (Standard/Optimized/Realtime via WebSocket)
+- [x] **Battery monitoring** with INA219 sensor
+- [x] **Snapshot and video recording** with synchronized audio
+- [x] **Text-to-Speech output** with Piper TTS support
+- [x] **Word prediction system** for faster text input
+- [x] **Remote access** (via external ZeroTier configuration)
+- [x] **Robust device auto-detection** with fallback mechanisms
+- [x] **Web UI with responsive design**
+- [x] **Audio utilities** for volume control and device management
 
 ### **🚧 In Progress**
-- [ ] Enhanced audio streaming (WebRTC)
-- [ ] Direct SSD boot support
-- [ ] IMU/compass integration
-- [ ] Mobile-optimized UI
-- [ ] Servo camera control
+- [ ] **Server-centralized architecture** (detailed proposal available in docs/)
+- [ ] **Enhanced WebRTC integration** for lower latency
+- [ ] **Direct SSD boot support**
+- [ ] **IMU/compass integration**
+- [ ] **Mobile-optimized UI improvements**
+- [ ] **Servo camera control**
 
 ### **📋 Planned Features**
-- [ ] LIDAR obstacle detection
-- [ ] Voice control integration
-- [ ] Multi-user access control
-- [ ] Cloud recording storage
-- [ ] Mobile companion app
+- [ ] **LIDAR obstacle detection**
+- [ ] **Voice control integration**
+- [ ] **Multi-user access control**
+- [ ] **Cloud recording storage**
+- [ ] **Mobile companion app**
+- [ ] **Mumble integration** for bidirectional audio communication
 
 ## 🤝 Contributing
 
@@ -230,6 +287,23 @@ Contributions are welcome! This project aims to improve accessibility and indepe
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+
+## 📚 Advanced Documentation
+
+Pentru informații detaliate despre arhitectură și funcționalități avansate, consultă:
+
+- **[fluxuri.md](docs/fluxuri.md)** - Documentația completă a fluxurilor de comunicare (video, audio, control motor, ZeroTier VPN)
+- **[propunere.md](docs/propunere.md)** - Propunerea tehnică pentru migrarea la arhitectura server-centralizată
+- **[MODULAR_REFACTOR_SUMMARY.md](MODULAR_REFACTOR_SUMMARY.md)** - Rezumatul refactorizării modulare
+- **[MODULES_README.md](MODULES_README.md)** - Ghidul de utilizare al modulelor
+
+### **Caracteristici Tehnice Avansate**
+
+- **Audio Streaming Multi-Modal**: Standard (AAC), Optimized (Opus 16kbps), Realtime (PCM/WebSocket)
+- **Video Adaptiv**: Rezoluție și calitate adaptivă în funcție de bandwidth
+- **Predicție de Text**: Sistem inteligent de sugerare cuvinte pentru TTS
+- **Diagnostice Complete**: Verificări automate de sistem, permisiuni și dependențe
+- **Fallback Robust**: Module dummy pentru funcționarea continuă la eșecuri hardware
 
 ## 📄 License
 
